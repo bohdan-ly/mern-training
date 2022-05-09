@@ -11,7 +11,7 @@ const tourSchema = new mongoose.Schema(
       trim: true,
       minLength: [10, 'Tour name must be at least 10 characters'],
       maxLength: [40, 'Tour name must be at most 40 characters'],
-      validate: [isAlpha, 'Name should contain alpha characters'],
+      // validate: [isAlpha, 'Name should contain alpha characters'],
     },
     slug: String,
     duration: { type: Number, required: [true, 'Duration is required'] },
@@ -36,7 +36,7 @@ const tourSchema = new mongoose.Schema(
       type: Number,
       validate: {
         validator: function (val) {
-          // this. works only when we create NEW instance
+          // this. works only when we create NEW instance, so CREATE or SAVE
           return val < this.price;
         },
         message: 'Discount ({VALUE}) must be lower than price',
