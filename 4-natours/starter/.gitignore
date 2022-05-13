@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+build/
+lib/
+.idea/
+dist/
+
+#files
+yarn.lock
+.yarnclean
+
+# misc
+.DS_Store
+.env
+yarn-error.log
