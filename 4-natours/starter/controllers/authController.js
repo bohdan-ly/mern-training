@@ -17,19 +17,32 @@ const createSendToken = ({ id, user = null, statusCode, res }) => {
   const resBody = { status: 'success', token };
 
   if (user) {
+    user.password = undefined;
+    user.active = undefined;
     resBody.data = { user };
   }
 
+  const cookieOptions = {
+    expires: new Date(
+      Date.now() + process.env.JWT_COOKIE_EXPIRES_IN + 24 * 60 * 60 * 1000
+    ),
+    httpOnly: true,
+  };
+
+  if (process.env.NODE_ENV === 'production') cookieOptions.secure = true;
+
+  res.cookie('jwt', token, cookieOptions);
   res.status(statusCode).json(resBody);
 };
 
 exports.signup = catchAsync(async (req, res, next) => {
-  const { name, email, password, passwordConfirm, passwordChangedAt } =
+  const { name, email, password, passwordConfirm, passwordChangedAt, role } =
     req.body || {};
 
   const newUser = await User.create({
     name,
     email,
+    role,
     password,
     passwordConfirm,
     passwordChangedAt,
@@ -63,7 +76,10 @@ exports.verify = catchAsync(async (req, res, next) => {
 
   // 2) Verification token
 
-  if (!token) return next(new AppError('Please login to get an access.', 401));
+  if (!token)
+    return next(
+      new AppError('You are not logged in. Please login to get an access.', 401)
+    );
 
   // 3) Check if user still exist
 

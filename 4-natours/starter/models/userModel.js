@@ -43,6 +43,11 @@ const userSchema = new mongoose.Schema({
   passwordChangedAt: Date,
   passwordResetToken: String,
   passwordResetExpires: Date,
+  active: {
+    type: Boolean,
+    default: true,
+    select: false,
+  },
 });
 
 userSchema.pre(/^save/gi, async function (next) {
@@ -54,6 +59,12 @@ userSchema.pre(/^save/gi, async function (next) {
 
   this.password = await bcrypt.hash(this.password, 12);
   this.passwordConfirm = undefined;
+  next();
+});
+
+userSchema.pre(/^find/gi, function (next) {
+  // this keyword points to current query
+  this.find({ active: { $ne: false } });
   next();
 });
 

@@ -10,7 +10,7 @@ class APIFeatures {
 
     this.query.schema.eachPath((path) => {
       if (path in this.queryString) {
-        queryFilter[path] = this.queryString.query[path];
+        queryFilter[path] = this.queryString[path];
       }
     });
 
