@@ -1,4 +1,5 @@
 const Tour = require('../models/tourModel');
+const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
 const factory = require('./handlerFactory');
 
@@ -14,6 +15,71 @@ exports.getTour = factory.getOne(Tour, { path: 'reviews' });
 exports.createTour = factory.createOne(Tour);
 exports.updateTour = factory.updateOne(Tour);
 exports.deleteTour = factory.deleteOne(Tour);
+
+exports.getWithinTours = catchAsync(async (req, res, next) => {
+  const { distance, latlng, unit } = req.params;
+
+  if (!distance || !latlng) return next(new AppError('Invalid params.', 400));
+
+  const [lat, lng] = latlng.split(',');
+
+  if (!lat || !lng)
+    return next(
+      new AppError(
+        'Please provide latitude and longitude in the format lat,lng.',
+        400
+      )
+    );
+
+  const radius = unit === 'mi' ? distance / 3963.2 : distance / 6378.1;
+
+  const tours = await Tour.find({
+    startLocation: { $geoWithin: { $centerSphere: [[lng, lat], radius] } },
+  });
+
+  res
+    .status(200)
+    .json({ status: 'success', results: tours.length, data: { data: tours } });
+});
+
+exports.distance = catchAsync(async (req, res, next) => {
+  const { latlng, unit } = req.params;
+
+  if (!latlng) return next(new AppError('Invalid params.', 400));
+
+  const [lat, lng] = latlng.split(',');
+
+  if (!lat || !lng)
+    return next(
+      new AppError(
+        'Please provide latitude and longitude in the format lat,lng.',
+        400
+      )
+    );
+
+  const distanceMultiplier = unit === 'mi' ? 0.000621371 : 0.001;
+
+  const distance = await Tour.aggregate([
+    {
+      $geoNear: {
+        near: {
+          type: 'Point',
+          coordinates: [+lng, +lat],
+        },
+        distanceField: 'distance',
+        distanceMultiplier,
+      },
+    },
+    {
+      $project: {
+        distance: 1,
+        name: 1,
+      },
+    },
+  ]);
+
+  res.status(200).json({ status: 'success', data: { data: distance } });
+});
 
 exports.getTourStats = catchAsync(async (req, res, next) => {
   // try {
