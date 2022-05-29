@@ -1,0 +1,17 @@
+
+mixin reviewCard(review)
+    .reviews__card
+        .reviews__avatar
+            img.reviews__avatar-img(src=`/img/users/${(review.user || {}).photo}` alt=(review.user || {}).name)
+            h6.reviews__user= review.user.name
+        p.reviews__text= review.review
+        .reviews__rating
+            each star in [...Array(5).keys()]
+                svg.reviews__star(class=`reviews__star--${review.rating > star ? 'active' : ''}`)
+                    use(xlink:href='/img/icons.svg#icon-star')
+            //- each star in [...Array(review.rating).keys()]
+            //-     svg.reviews__star.reviews__star--active
+            //-         use(xlink:href='/img/icons.svg#icon-star')
+            //- each star in [...Array(5 - review.rating).keys()]   
+            //-     svg.reviews__star
+            //-         use(xlink:href='/img/icons.svg#icon-star') 
