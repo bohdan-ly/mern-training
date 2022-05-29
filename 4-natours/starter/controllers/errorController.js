@@ -24,10 +24,19 @@ const handleJWTError = () =>
   new AppError('Invalid token. Please login again.', 401);
 
 const handleJWTExpiredError = () =>
-  new AppError('Expired session. Please login again.', 401);
+  new AppError('Expired session. Please login a gain.', 401);
 
-const sendErrorDev = (err, res) => {
-  res.status(err.statusCode).json({
+const sendErrorDev = (err, req, res) => {
+  if (req.originalUrl.startsWith('/api')) {
+    return res.status(err.statusCode).json({
+      status: err.status,
+      message: err.message,
+      stack: err.stack,
+      error: err,
+    });
+  }
+
+  return res.status(err.statusCode).render('', {
     status: err.status,
     message: err.message,
     stack: err.stack,
@@ -63,7 +72,7 @@ module.exports = (err, req, res, next) => {
 
   switch (process.env.NODE_ENV) {
     case 'development':
-      sendErrorDev(err, res);
+      sendErrorDev(err, req, res);
       break;
     case 'production':
     default:
@@ -86,7 +95,7 @@ module.exports = (err, req, res, next) => {
           break;
       }
 
-      sendErrorProd(error, res);
+      sendErrorProd(error, req, res);
       break;
   }
 };

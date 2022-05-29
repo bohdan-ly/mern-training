@@ -1174,6 +1174,7 @@ body {
 }
 .card__footer-value {
   font-weight: 700;
+  /* margin-right: 5px; */
 }
 .card__footer-text {
   color: #999;
