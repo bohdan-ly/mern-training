@@ -8,7 +8,7 @@ export const login = async ({ email, password }) => {
 
     const res = await axios({
       method: 'POST',
-      url: 'http://localhost:8000/api/v1/users/login',
+      url: '/api/v1/users/login',
       data: {
         email,
         password,
@@ -29,7 +29,7 @@ export const logout = async ({ email, password }) => {
     // @ts-ignore
     const res = await axios({
       method: 'GET',
-      url: 'http://localhost:8000/api/v1/users/logout',
+      url: '/api/v1/users/logout',
     });
 
     // @ts-ignore
