@@ -4,8 +4,10 @@ import '@babel/polyfill';
 import { login, logout } from './login';
 import { displayMap } from './mapbox';
 import { updateSettings } from './updateSettings';
+import { bookTour } from './stripe';
 
 const mapBox = document.getElementById('map');
+const bookBtn = document.getElementById('book-tour');
 const loginForm = document.querySelector('#login');
 const settingsForm = document.querySelector('.form-user-data');
 const passwordForm = document.querySelector('.form-user-settings');
@@ -74,3 +76,11 @@ if (passwordForm) {
 
 // @ts-ignore
 if (logOutBtn) logOutBtn.addEventListener('click', logout);
+
+if (bookBtn)
+  bookBtn.addEventListener('click', async (e) => {
+    e.target.textContent = 'Processing...';
+    const { tourId } = e.target.dataset;
+    await bookTour(tourId);
+    e.target.textContent = 'Book tour now!';
+  });

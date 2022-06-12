@@ -7625,12 +7625,20 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],"../../node_modules/buffer/index.js":[function(require,module,exports) {
+},{}],"../../node_modules/isarray/index.js":[function(require,module,exports) {
+var toString = {}.toString;
 
+module.exports = Array.isArray || function (arr) {
+  return toString.call(arr) == '[object Array]';
+};
+
+},{}],"../../node_modules/node-libs-browser/node_modules/buffer/index.js":[function(require,module,exports) {
+
+var global = arguments[3];
 /*!
  * The buffer module from node.js, for the browser.
  *
- * @author   Feross Aboukhadijeh <https://feross.org>
+ * @author   Feross Aboukhadijeh <http://feross.org>
  * @license  MIT
  */
 /* eslint-disable no-proto */
@@ -7639,79 +7647,80 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
 var base64 = require('base64-js')
 var ieee754 = require('ieee754')
-var customInspectSymbol =
-  (typeof Symbol === 'function' && typeof Symbol['for'] === 'function') // eslint-disable-line dot-notation
-    ? Symbol['for']('nodejs.util.inspect.custom') // eslint-disable-line dot-notation
-    : null
+var isArray = require('isarray')
 
 exports.Buffer = Buffer
 exports.SlowBuffer = SlowBuffer
 exports.INSPECT_MAX_BYTES = 50
 
-var K_MAX_LENGTH = 0x7fffffff
-exports.kMaxLength = K_MAX_LENGTH
-
 /**
  * If `Buffer.TYPED_ARRAY_SUPPORT`:
  *   === true    Use Uint8Array implementation (fastest)
- *   === false   Print warning and recommend using `buffer` v4.x which has an Object
- *               implementation (most compatible, even IE6)
+ *   === false   Use Object implementation (most compatible, even IE6)
  *
  * Browsers that support typed arrays are IE 10+, Firefox 4+, Chrome 7+, Safari 5.1+,
  * Opera 11.6+, iOS 4.2+.
  *
- * We report that the browser does not support typed arrays if the are not subclassable
- * using __proto__. Firefox 4-29 lacks support for adding new properties to `Uint8Array`
- * (See: https://bugzilla.mozilla.org/show_bug.cgi?id=695438). IE 10 lacks support
- * for __proto__ and has a buggy typed array implementation.
- */
-Buffer.TYPED_ARRAY_SUPPORT = typedArraySupport()
+ * Due to various browser bugs, sometimes the Object implementation will be used even
+ * when the browser supports typed arrays.
+ *
+ * Note:
+ *
+ *   - Firefox 4-29 lacks support for adding new properties to `Uint8Array` instances,
+ *     See: https://bugzilla.mozilla.org/show_bug.cgi?id=695438.
+ *
+ *   - Chrome 9-10 is missing the `TypedArray.prototype.subarray` function.
+ *
+ *   - IE10 has a broken `TypedArray.prototype.subarray` function which returns arrays of
+ *     incorrect length in some situations.
 
-if (!Buffer.TYPED_ARRAY_SUPPORT && typeof console !== 'undefined' &&
-    typeof console.error === 'function') {
-  console.error(
-    'This browser lacks typed array (Uint8Array) support which is required by ' +
-    '`buffer` v5.x. Use `buffer` v4.x if you require old browser support.'
-  )
-}
+ * We detect these buggy browsers and set `Buffer.TYPED_ARRAY_SUPPORT` to `false` so they
+ * get the Object implementation, which is slower but behaves correctly.
+ */
+Buffer.TYPED_ARRAY_SUPPORT = global.TYPED_ARRAY_SUPPORT !== undefined
+  ? global.TYPED_ARRAY_SUPPORT
+  : typedArraySupport()
+
+/*
+ * Export kMaxLength after typed array support is determined.
+ */
+exports.kMaxLength = kMaxLength()
 
 function typedArraySupport () {
-  // Can typed array instances can be augmented?
   try {
     var arr = new Uint8Array(1)
-    var proto = { foo: function () { return 42 } }
-    Object.setPrototypeOf(proto, Uint8Array.prototype)
-    Object.setPrototypeOf(arr, proto)
-    return arr.foo() === 42
+    arr.__proto__ = {__proto__: Uint8Array.prototype, foo: function () { return 42 }}
+    return arr.foo() === 42 && // typed array instances can be augmented
+        typeof arr.subarray === 'function' && // chrome 9-10 lack `subarray`
+        arr.subarray(1, 1).byteLength === 0 // ie10 has broken `subarray`
   } catch (e) {
     return false
   }
 }
 
-Object.defineProperty(Buffer.prototype, 'parent', {
-  enumerable: true,
-  get: function () {
-    if (!Buffer.isBuffer(this)) return undefined
-    return this.buffer
-  }
-})
+function kMaxLength () {
+  return Buffer.TYPED_ARRAY_SUPPORT
+    ? 0x7fffffff
+    : 0x3fffffff
+}
 
-Object.defineProperty(Buffer.prototype, 'offset', {
-  enumerable: true,
-  get: function () {
-    if (!Buffer.isBuffer(this)) return undefined
-    return this.byteOffset
+function createBuffer (that, length) {
+  if (kMaxLength() < length) {
+    throw new RangeError('Invalid typed array length')
   }
-})
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    // Return an augmented `Uint8Array` instance, for best performance
+    that = new Uint8Array(length)
+    that.__proto__ = Buffer.prototype
+  } else {
+    // Fallback: Return an object instance of the Buffer class
+    if (that === null) {
+      that = new Buffer(length)
+    }
+    that.length = length
+  }
 
-function createBuffer (length) {
-  if (length > K_MAX_LENGTH) {
-    throw new RangeError('The value "' + length + '" is invalid for option "size"')
-  }
-  // Return an augmented `Uint8Array` instance
-  var buf = new Uint8Array(length)
-  Object.setPrototypeOf(buf, Buffer.prototype)
-  return buf
+  return that
 }
 
 /**
@@ -7725,72 +7734,44 @@ function createBuffer (length) {
  */
 
 function Buffer (arg, encodingOrOffset, length) {
+  if (!Buffer.TYPED_ARRAY_SUPPORT && !(this instanceof Buffer)) {
+    return new Buffer(arg, encodingOrOffset, length)
+  }
+
   // Common case.
   if (typeof arg === 'number') {
     if (typeof encodingOrOffset === 'string') {
-      throw new TypeError(
-        'The "string" argument must be of type string. Received type number'
+      throw new Error(
+        'If encoding is specified then the first argument must be a string'
       )
     }
-    return allocUnsafe(arg)
+    return allocUnsafe(this, arg)
   }
-  return from(arg, encodingOrOffset, length)
+  return from(this, arg, encodingOrOffset, length)
 }
 
 Buffer.poolSize = 8192 // not used by this implementation
 
-function from (value, encodingOrOffset, length) {
-  if (typeof value === 'string') {
-    return fromString(value, encodingOrOffset)
-  }
+// TODO: Legacy, not needed anymore. Remove in next major version.
+Buffer._augment = function (arr) {
+  arr.__proto__ = Buffer.prototype
+  return arr
+}
 
-  if (ArrayBuffer.isView(value)) {
-    return fromArrayView(value)
-  }
-
-  if (value == null) {
-    throw new TypeError(
-      'The first argument must be one of type string, Buffer, ArrayBuffer, Array, ' +
-      'or Array-like Object. Received type ' + (typeof value)
-    )
-  }
-
-  if (isInstance(value, ArrayBuffer) ||
-      (value && isInstance(value.buffer, ArrayBuffer))) {
-    return fromArrayBuffer(value, encodingOrOffset, length)
-  }
-
-  if (typeof SharedArrayBuffer !== 'undefined' &&
-      (isInstance(value, SharedArrayBuffer) ||
-      (value && isInstance(value.buffer, SharedArrayBuffer)))) {
-    return fromArrayBuffer(value, encodingOrOffset, length)
-  }
-
+function from (that, value, encodingOrOffset, length) {
   if (typeof value === 'number') {
-    throw new TypeError(
-      'The "value" argument must not be of type number. Received type number'
-    )
+    throw new TypeError('"value" argument must not be a number')
   }
 
-  var valueOf = value.valueOf && value.valueOf()
-  if (valueOf != null && valueOf !== value) {
-    return Buffer.from(valueOf, encodingOrOffset, length)
+  if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer) {
+    return fromArrayBuffer(that, value, encodingOrOffset, length)
   }
 
-  var b = fromObject(value)
-  if (b) return b
-
-  if (typeof Symbol !== 'undefined' && Symbol.toPrimitive != null &&
-      typeof value[Symbol.toPrimitive] === 'function') {
-    return Buffer.from(
-      value[Symbol.toPrimitive]('string'), encodingOrOffset, length
-    )
+  if (typeof value === 'string') {
+    return fromString(that, value, encodingOrOffset)
   }
 
-  throw new TypeError(
-    'The first argument must be one of type string, Buffer, ArrayBuffer, Array, ' +
-    'or Array-like Object. Received type ' + (typeof value)
-  )
+  return fromObject(that, value)
 }
 
 /**
@@ -7802,36 +7783,44 @@ function from (value, encodingOrOffset, length) {
  * Buffer.from(arrayBuffer[, byteOffset[, length]])
  **/
 Buffer.from = function (value, encodingOrOffset, length) {
-  return from(value, encodingOrOffset, length)
+  return from(null, value, encodingOrOffset, length)
 }
 
-// Note: Change prototype *after* Buffer.from is defined to workaround Chrome bug:
-// https://github.com/feross/buffer/pull/148
-Object.setPrototypeOf(Buffer.prototype, Uint8Array.prototype)
-Object.setPrototypeOf(Buffer, Uint8Array)
-
-function assertSize (size) {
-  if (typeof size !== 'number') {
-    throw new TypeError('"size" argument must be of type number')
-  } else if (size < 0) {
-    throw new RangeError('The value "' + size + '" is invalid for option "size"')
+if (Buffer.TYPED_ARRAY_SUPPORT) {
+  Buffer.prototype.__proto__ = Uint8Array.prototype
+  Buffer.__proto__ = Uint8Array
+  if (typeof Symbol !== 'undefined' && Symbol.species &&
+      Buffer[Symbol.species] === Buffer) {
+    // Fix subarray() in ES2016. See: https://github.com/feross/buffer/pull/97
+    Object.defineProperty(Buffer, Symbol.species, {
+      value: null,
+      configurable: true
+    })
   }
 }
 
-function alloc (size, fill, encoding) {
+function assertSize (size) {
+  if (typeof size !== 'number') {
+    throw new TypeError('"size" argument must be a number')
+  } else if (size < 0) {
+    throw new RangeError('"size" argument must not be negative')
+  }
+}
+
+function alloc (that, size, fill, encoding) {
   assertSize(size)
   if (size <= 0) {
-    return createBuffer(size)
+    return createBuffer(that, size)
   }
   if (fill !== undefined) {
     // Only pay attention to encoding if it's a string. This
     // prevents accidentally sending in a number that would
-    // be interpreted as a start offset.
+    // be interpretted as a start offset.
     return typeof encoding === 'string'
-      ? createBuffer(size).fill(fill, encoding)
-      : createBuffer(size).fill(fill)
+      ? createBuffer(that, size).fill(fill, encoding)
+      : createBuffer(that, size).fill(fill)
   }
-  return createBuffer(size)
+  return createBuffer(that, size)
 }
 
 /**
@@ -7839,123 +7828,132 @@ function alloc (size, fill, encoding) {
  * alloc(size[, fill[, encoding]])
  **/
 Buffer.alloc = function (size, fill, encoding) {
-  return alloc(size, fill, encoding)
+  return alloc(null, size, fill, encoding)
 }
 
-function allocUnsafe (size) {
+function allocUnsafe (that, size) {
   assertSize(size)
-  return createBuffer(size < 0 ? 0 : checked(size) | 0)
+  that = createBuffer(that, size < 0 ? 0 : checked(size) | 0)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) {
+    for (var i = 0; i < size; ++i) {
+      that[i] = 0
+    }
+  }
+  return that
 }
 
 /**
  * Equivalent to Buffer(num), by default creates a non-zero-filled Buffer instance.
  * */
 Buffer.allocUnsafe = function (size) {
-  return allocUnsafe(size)
+  return allocUnsafe(null, size)
 }
 /**
  * Equivalent to SlowBuffer(num), by default creates a non-zero-filled Buffer instance.
  */
 Buffer.allocUnsafeSlow = function (size) {
-  return allocUnsafe(size)
+  return allocUnsafe(null, size)
 }
 
-function fromString (string, encoding) {
+function fromString (that, string, encoding) {
   if (typeof encoding !== 'string' || encoding === '') {
     encoding = 'utf8'
   }
 
   if (!Buffer.isEncoding(encoding)) {
-    throw new TypeError('Unknown encoding: ' + encoding)
+    throw new TypeError('"encoding" must be a valid string encoding')
   }
 
   var length = byteLength(string, encoding) | 0
-  var buf = createBuffer(length)
+  that = createBuffer(that, length)
 
-  var actual = buf.write(string, encoding)
+  var actual = that.write(string, encoding)
 
   if (actual !== length) {
     // Writing a hex string, for example, that contains invalid characters will
     // cause everything after the first invalid character to be ignored. (e.g.
     // 'abxxcd' will be treated as 'ab')
-    buf = buf.slice(0, actual)
+    that = that.slice(0, actual)
   }
 
-  return buf
+  return that
 }
 
-function fromArrayLike (array) {
+function fromArrayLike (that, array) {
   var length = array.length < 0 ? 0 : checked(array.length) | 0
-  var buf = createBuffer(length)
+  that = createBuffer(that, length)
   for (var i = 0; i < length; i += 1) {
-    buf[i] = array[i] & 255
+    that[i] = array[i] & 255
   }
-  return buf
+  return that
 }
 
-function fromArrayView (arrayView) {
-  if (isInstance(arrayView, Uint8Array)) {
-    var copy = new Uint8Array(arrayView)
-    return fromArrayBuffer(copy.buffer, copy.byteOffset, copy.byteLength)
-  }
-  return fromArrayLike(arrayView)
-}
+function fromArrayBuffer (that, array, byteOffset, length) {
+  array.byteLength // this throws if `array` is not a valid ArrayBuffer
 
-function fromArrayBuffer (array, byteOffset, length) {
   if (byteOffset < 0 || array.byteLength < byteOffset) {
-    throw new RangeError('"offset" is outside of buffer bounds')
+    throw new RangeError('\'offset\' is out of bounds')
   }
 
   if (array.byteLength < byteOffset + (length || 0)) {
-    throw new RangeError('"length" is outside of buffer bounds')
+    throw new RangeError('\'length\' is out of bounds')
   }
 
-  var buf
   if (byteOffset === undefined && length === undefined) {
-    buf = new Uint8Array(array)
+    array = new Uint8Array(array)
   } else if (length === undefined) {
-    buf = new Uint8Array(array, byteOffset)
+    array = new Uint8Array(array, byteOffset)
   } else {
-    buf = new Uint8Array(array, byteOffset, length)
+    array = new Uint8Array(array, byteOffset, length)
   }
 
-  // Return an augmented `Uint8Array` instance
-  Object.setPrototypeOf(buf, Buffer.prototype)
-
-  return buf
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    // Return an augmented `Uint8Array` instance, for best performance
+    that = array
+    that.__proto__ = Buffer.prototype
+  } else {
+    // Fallback: Return an object instance of the Buffer class
+    that = fromArrayLike(that, array)
+  }
+  return that
 }
 
-function fromObject (obj) {
+function fromObject (that, obj) {
   if (Buffer.isBuffer(obj)) {
     var len = checked(obj.length) | 0
-    var buf = createBuffer(len)
+    that = createBuffer(that, len)
 
-    if (buf.length === 0) {
-      return buf
+    if (that.length === 0) {
+      return that
     }
 
-    obj.copy(buf, 0, 0, len)
-    return buf
+    obj.copy(that, 0, 0, len)
+    return that
   }
 
-  if (obj.length !== undefined) {
-    if (typeof obj.length !== 'number' || numberIsNaN(obj.length)) {
-      return createBuffer(0)
+  if (obj) {
+    if ((typeof ArrayBuffer !== 'undefined' &&
+        obj.buffer instanceof ArrayBuffer) || 'length' in obj) {
+      if (typeof obj.length !== 'number' || isnan(obj.length)) {
+        return createBuffer(that, 0)
+      }
+      return fromArrayLike(that, obj)
     }
-    return fromArrayLike(obj)
+
+    if (obj.type === 'Buffer' && isArray(obj.data)) {
+      return fromArrayLike(that, obj.data)
+    }
   }
 
-  if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
-    return fromArrayLike(obj.data)
-  }
+  throw new TypeError('First argument must be a string, Buffer, ArrayBuffer, Array, or array-like object.')
 }
 
 function checked (length) {
-  // Note: cannot use `length < K_MAX_LENGTH` here because that fails when
+  // Note: cannot use `length < kMaxLength()` here because that fails when
   // length is NaN (which is otherwise coerced to zero.)
-  if (length >= K_MAX_LENGTH) {
+  if (length >= kMaxLength()) {
     throw new RangeError('Attempt to allocate Buffer larger than maximum ' +
-                         'size: 0x' + K_MAX_LENGTH.toString(16) + ' bytes')
+                         'size: 0x' + kMaxLength().toString(16) + ' bytes')
   }
   return length | 0
 }
@@ -7968,17 +7966,12 @@ function SlowBuffer (length) {
 }
 
 Buffer.isBuffer = function isBuffer (b) {
-  return b != null && b._isBuffer === true &&
-    b !== Buffer.prototype // so Buffer.isBuffer(Buffer.prototype) will be false
+  return !!(b != null && b._isBuffer)
 }
 
 Buffer.compare = function compare (a, b) {
-  if (isInstance(a, Uint8Array)) a = Buffer.from(a, a.offset, a.byteLength)
-  if (isInstance(b, Uint8Array)) b = Buffer.from(b, b.offset, b.byteLength)
   if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
-    throw new TypeError(
-      'The "buf1", "buf2" arguments must be one of type Buffer or Uint8Array'
-    )
+    throw new TypeError('Arguments must be Buffers')
   }
 
   if (a === b) return 0
@@ -8019,7 +8012,7 @@ Buffer.isEncoding = function isEncoding (encoding) {
 }
 
 Buffer.concat = function concat (list, length) {
-  if (!Array.isArray(list)) {
+  if (!isArray(list)) {
     throw new TypeError('"list" argument must be an Array of Buffers')
   }
 
@@ -8039,21 +8032,10 @@ Buffer.concat = function concat (list, length) {
   var pos = 0
   for (i = 0; i < list.length; ++i) {
     var buf = list[i]
-    if (isInstance(buf, Uint8Array)) {
-      if (pos + buf.length > buffer.length) {
-        Buffer.from(buf).copy(buffer, pos)
-      } else {
-        Uint8Array.prototype.set.call(
-          buffer,
-          buf,
-          pos
-        )
-      }
-    } else if (!Buffer.isBuffer(buf)) {
+    if (!Buffer.isBuffer(buf)) {
       throw new TypeError('"list" argument must be an Array of Buffers')
-    } else {
-      buf.copy(buffer, pos)
     }
+    buf.copy(buffer, pos)
     pos += buf.length
   }
   return buffer
@@ -8063,19 +8045,16 @@ function byteLength (string, encoding) {
   if (Buffer.isBuffer(string)) {
     return string.length
   }
-  if (ArrayBuffer.isView(string) || isInstance(string, ArrayBuffer)) {
+  if (typeof ArrayBuffer !== 'undefined' && typeof ArrayBuffer.isView === 'function' &&
+      (ArrayBuffer.isView(string) || string instanceof ArrayBuffer)) {
     return string.byteLength
   }
   if (typeof string !== 'string') {
-    throw new TypeError(
-      'The "string" argument must be one of type string, Buffer, or ArrayBuffer. ' +
-      'Received type ' + typeof string
-    )
+    string = '' + string
   }
 
   var len = string.length
-  var mustMatch = (arguments.length > 2 && arguments[2] === true)
-  if (!mustMatch && len === 0) return 0
+  if (len === 0) return 0
 
   // Use a for loop to avoid recursion
   var loweredCase = false
@@ -8087,6 +8066,7 @@ function byteLength (string, encoding) {
         return len
       case 'utf8':
       case 'utf-8':
+      case undefined:
         return utf8ToBytes(string).length
       case 'ucs2':
       case 'ucs-2':
@@ -8098,9 +8078,7 @@ function byteLength (string, encoding) {
       case 'base64':
         return base64ToBytes(string).length
       default:
-        if (loweredCase) {
-          return mustMatch ? -1 : utf8ToBytes(string).length // assume utf8
-        }
+        if (loweredCase) return utf8ToBytes(string).length // assume utf8
         encoding = ('' + encoding).toLowerCase()
         loweredCase = true
     }
@@ -8135,7 +8113,7 @@ function slowToString (encoding, start, end) {
     return ''
   }
 
-  // Force coercion to uint32. This will also coerce falsey/NaN values to 0.
+  // Force coersion to uint32. This will also coerce falsey/NaN values to 0.
   end >>>= 0
   start >>>= 0
 
@@ -8178,12 +8156,8 @@ function slowToString (encoding, start, end) {
   }
 }
 
-// This property is used by `Buffer.isBuffer` (and the `is-buffer` npm package)
-// to detect a Buffer instance. It's not possible to use `instanceof Buffer`
-// reliably in a browserify context because there could be multiple different
-// copies of the 'buffer' package in use. This method works even for Buffer
-// instances that were created from another copy of the `buffer` package.
-// See: https://github.com/feross/buffer/issues/154
+// The property is used by `Buffer.isBuffer` and `is-buffer` (in Safari 5-7) to detect
+// Buffer instances.
 Buffer.prototype._isBuffer = true
 
 function swap (b, n, m) {
@@ -8230,13 +8204,11 @@ Buffer.prototype.swap64 = function swap64 () {
 }
 
 Buffer.prototype.toString = function toString () {
-  var length = this.length
+  var length = this.length | 0
   if (length === 0) return ''
   if (arguments.length === 0) return utf8Slice(this, 0, length)
   return slowToString.apply(this, arguments)
 }
-
-Buffer.prototype.toLocaleString = Buffer.prototype.toString
 
 Buffer.prototype.equals = function equals (b) {
   if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
@@ -8247,23 +8219,16 @@ Buffer.prototype.equals = function equals (b) {
 Buffer.prototype.inspect = function inspect () {
   var str = ''
   var max = exports.INSPECT_MAX_BYTES
-  str = this.toString('hex', 0, max).replace(/(.{2})/g, '$1 ').trim()
-  if (this.length > max) str += ' ... '
+  if (this.length > 0) {
+    str = this.toString('hex', 0, max).match(/.{2}/g).join(' ')
+    if (this.length > max) str += ' ... '
+  }
   return '<Buffer ' + str + '>'
-}
-if (customInspectSymbol) {
-  Buffer.prototype[customInspectSymbol] = Buffer.prototype.inspect
 }
 
 Buffer.prototype.compare = function compare (target, start, end, thisStart, thisEnd) {
-  if (isInstance(target, Uint8Array)) {
-    target = Buffer.from(target, target.offset, target.byteLength)
-  }
   if (!Buffer.isBuffer(target)) {
-    throw new TypeError(
-      'The "target" argument must be one of type Buffer or Uint8Array. ' +
-      'Received type ' + (typeof target)
-    )
+    throw new TypeError('Argument must be a Buffer')
   }
 
   if (start === undefined) {
@@ -8342,8 +8307,8 @@ function bidirectionalIndexOf (buffer, val, byteOffset, encoding, dir) {
   } else if (byteOffset < -0x80000000) {
     byteOffset = -0x80000000
   }
-  byteOffset = +byteOffset // Coerce to Number.
-  if (numberIsNaN(byteOffset)) {
+  byteOffset = +byteOffset  // Coerce to Number.
+  if (isNaN(byteOffset)) {
     // byteOffset: it it's undefined, null, NaN, "foo", etc, search whole buffer
     byteOffset = dir ? 0 : (buffer.length - 1)
   }
@@ -8372,14 +8337,15 @@ function bidirectionalIndexOf (buffer, val, byteOffset, encoding, dir) {
     return arrayIndexOf(buffer, val, byteOffset, encoding, dir)
   } else if (typeof val === 'number') {
     val = val & 0xFF // Search for a byte value [0-255]
-    if (typeof Uint8Array.prototype.indexOf === 'function') {
+    if (Buffer.TYPED_ARRAY_SUPPORT &&
+        typeof Uint8Array.prototype.indexOf === 'function') {
       if (dir) {
         return Uint8Array.prototype.indexOf.call(buffer, val, byteOffset)
       } else {
         return Uint8Array.prototype.lastIndexOf.call(buffer, val, byteOffset)
       }
     }
-    return arrayIndexOf(buffer, [val], byteOffset, encoding, dir)
+    return arrayIndexOf(buffer, [ val ], byteOffset, encoding, dir)
   }
 
   throw new TypeError('val must be string, number or Buffer')
@@ -8465,14 +8431,16 @@ function hexWrite (buf, string, offset, length) {
     }
   }
 
+  // must be an even number of digits
   var strLen = string.length
+  if (strLen % 2 !== 0) throw new TypeError('Invalid hex string')
 
   if (length > strLen / 2) {
     length = strLen / 2
   }
   for (var i = 0; i < length; ++i) {
     var parsed = parseInt(string.substr(i * 2, 2), 16)
-    if (numberIsNaN(parsed)) return i
+    if (isNaN(parsed)) return i
     buf[offset + i] = parsed
   }
   return i
@@ -8484,6 +8452,10 @@ function utf8Write (buf, string, offset, length) {
 
 function asciiWrite (buf, string, offset, length) {
   return blitBuffer(asciiToBytes(string), buf, offset, length)
+}
+
+function latin1Write (buf, string, offset, length) {
+  return asciiWrite(buf, string, offset, length)
 }
 
 function base64Write (buf, string, offset, length) {
@@ -8507,14 +8479,15 @@ Buffer.prototype.write = function write (string, offset, length, encoding) {
     offset = 0
   // Buffer#write(string, offset[, length][, encoding])
   } else if (isFinite(offset)) {
-    offset = offset >>> 0
+    offset = offset | 0
     if (isFinite(length)) {
-      length = length >>> 0
+      length = length | 0
       if (encoding === undefined) encoding = 'utf8'
     } else {
       encoding = length
       length = undefined
     }
+  // legacy write(string, encoding, offset, length) - remove in v0.13
   } else {
     throw new Error(
       'Buffer.write(string, encoding, offset[, length]) is no longer supported'
@@ -8541,9 +8514,11 @@ Buffer.prototype.write = function write (string, offset, length, encoding) {
         return utf8Write(this, string, offset, length)
 
       case 'ascii':
+        return asciiWrite(this, string, offset, length)
+
       case 'latin1':
       case 'binary':
-        return asciiWrite(this, string, offset, length)
+        return latin1Write(this, string, offset, length)
 
       case 'base64':
         // Warning: maxLength not taken into account in base64Write
@@ -8586,13 +8561,10 @@ function utf8Slice (buf, start, end) {
   while (i < end) {
     var firstByte = buf[i]
     var codePoint = null
-    var bytesPerSequence = (firstByte > 0xEF)
-      ? 4
-      : (firstByte > 0xDF)
-          ? 3
-          : (firstByte > 0xBF)
-              ? 2
-              : 1
+    var bytesPerSequence = (firstByte > 0xEF) ? 4
+      : (firstByte > 0xDF) ? 3
+      : (firstByte > 0xBF) ? 2
+      : 1
 
     if (i + bytesPerSequence <= end) {
       var secondByte, thirdByte, fourthByte, tempCodePoint
@@ -8705,7 +8677,7 @@ function hexSlice (buf, start, end) {
 
   var out = ''
   for (var i = start; i < end; ++i) {
-    out += hexSliceLookupTable[buf[i]]
+    out += toHex(buf[i])
   }
   return out
 }
@@ -8713,9 +8685,8 @@ function hexSlice (buf, start, end) {
 function utf16leSlice (buf, start, end) {
   var bytes = buf.slice(start, end)
   var res = ''
-  // If bytes.length is odd, the last 8 bits must be ignored (same as node.js)
-  for (var i = 0; i < bytes.length - 1; i += 2) {
-    res += String.fromCharCode(bytes[i] + (bytes[i + 1] * 256))
+  for (var i = 0; i < bytes.length; i += 2) {
+    res += String.fromCharCode(bytes[i] + bytes[i + 1] * 256)
   }
   return res
 }
@@ -8741,9 +8712,17 @@ Buffer.prototype.slice = function slice (start, end) {
 
   if (end < start) end = start
 
-  var newBuf = this.subarray(start, end)
-  // Return an augmented `Uint8Array` instance
-  Object.setPrototypeOf(newBuf, Buffer.prototype)
+  var newBuf
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    newBuf = this.subarray(start, end)
+    newBuf.__proto__ = Buffer.prototype
+  } else {
+    var sliceLen = end - start
+    newBuf = new Buffer(sliceLen, undefined)
+    for (var i = 0; i < sliceLen; ++i) {
+      newBuf[i] = this[i + start]
+    }
+  }
 
   return newBuf
 }
@@ -8756,10 +8735,9 @@ function checkOffset (offset, ext, length) {
   if (offset + ext > length) throw new RangeError('Trying to access beyond buffer length')
 }
 
-Buffer.prototype.readUintLE =
 Buffer.prototype.readUIntLE = function readUIntLE (offset, byteLength, noAssert) {
-  offset = offset >>> 0
-  byteLength = byteLength >>> 0
+  offset = offset | 0
+  byteLength = byteLength | 0
   if (!noAssert) checkOffset(offset, byteLength, this.length)
 
   var val = this[offset]
@@ -8772,10 +8750,9 @@ Buffer.prototype.readUIntLE = function readUIntLE (offset, byteLength, noAssert)
   return val
 }
 
-Buffer.prototype.readUintBE =
 Buffer.prototype.readUIntBE = function readUIntBE (offset, byteLength, noAssert) {
-  offset = offset >>> 0
-  byteLength = byteLength >>> 0
+  offset = offset | 0
+  byteLength = byteLength | 0
   if (!noAssert) {
     checkOffset(offset, byteLength, this.length)
   }
@@ -8789,30 +8766,22 @@ Buffer.prototype.readUIntBE = function readUIntBE (offset, byteLength, noAssert)
   return val
 }
 
-Buffer.prototype.readUint8 =
 Buffer.prototype.readUInt8 = function readUInt8 (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 1, this.length)
   return this[offset]
 }
 
-Buffer.prototype.readUint16LE =
 Buffer.prototype.readUInt16LE = function readUInt16LE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 2, this.length)
   return this[offset] | (this[offset + 1] << 8)
 }
 
-Buffer.prototype.readUint16BE =
 Buffer.prototype.readUInt16BE = function readUInt16BE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 2, this.length)
   return (this[offset] << 8) | this[offset + 1]
 }
 
-Buffer.prototype.readUint32LE =
 Buffer.prototype.readUInt32LE = function readUInt32LE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 4, this.length)
 
   return ((this[offset]) |
@@ -8821,9 +8790,7 @@ Buffer.prototype.readUInt32LE = function readUInt32LE (offset, noAssert) {
       (this[offset + 3] * 0x1000000)
 }
 
-Buffer.prototype.readUint32BE =
 Buffer.prototype.readUInt32BE = function readUInt32BE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 4, this.length)
 
   return (this[offset] * 0x1000000) +
@@ -8833,8 +8800,8 @@ Buffer.prototype.readUInt32BE = function readUInt32BE (offset, noAssert) {
 }
 
 Buffer.prototype.readIntLE = function readIntLE (offset, byteLength, noAssert) {
-  offset = offset >>> 0
-  byteLength = byteLength >>> 0
+  offset = offset | 0
+  byteLength = byteLength | 0
   if (!noAssert) checkOffset(offset, byteLength, this.length)
 
   var val = this[offset]
@@ -8851,8 +8818,8 @@ Buffer.prototype.readIntLE = function readIntLE (offset, byteLength, noAssert) {
 }
 
 Buffer.prototype.readIntBE = function readIntBE (offset, byteLength, noAssert) {
-  offset = offset >>> 0
-  byteLength = byteLength >>> 0
+  offset = offset | 0
+  byteLength = byteLength | 0
   if (!noAssert) checkOffset(offset, byteLength, this.length)
 
   var i = byteLength
@@ -8869,28 +8836,24 @@ Buffer.prototype.readIntBE = function readIntBE (offset, byteLength, noAssert) {
 }
 
 Buffer.prototype.readInt8 = function readInt8 (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 1, this.length)
   if (!(this[offset] & 0x80)) return (this[offset])
   return ((0xff - this[offset] + 1) * -1)
 }
 
 Buffer.prototype.readInt16LE = function readInt16LE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 2, this.length)
   var val = this[offset] | (this[offset + 1] << 8)
   return (val & 0x8000) ? val | 0xFFFF0000 : val
 }
 
 Buffer.prototype.readInt16BE = function readInt16BE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 2, this.length)
   var val = this[offset + 1] | (this[offset] << 8)
   return (val & 0x8000) ? val | 0xFFFF0000 : val
 }
 
 Buffer.prototype.readInt32LE = function readInt32LE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 4, this.length)
 
   return (this[offset]) |
@@ -8900,7 +8863,6 @@ Buffer.prototype.readInt32LE = function readInt32LE (offset, noAssert) {
 }
 
 Buffer.prototype.readInt32BE = function readInt32BE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 4, this.length)
 
   return (this[offset] << 24) |
@@ -8910,25 +8872,21 @@ Buffer.prototype.readInt32BE = function readInt32BE (offset, noAssert) {
 }
 
 Buffer.prototype.readFloatLE = function readFloatLE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 4, this.length)
   return ieee754.read(this, offset, true, 23, 4)
 }
 
 Buffer.prototype.readFloatBE = function readFloatBE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 4, this.length)
   return ieee754.read(this, offset, false, 23, 4)
 }
 
 Buffer.prototype.readDoubleLE = function readDoubleLE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 8, this.length)
   return ieee754.read(this, offset, true, 52, 8)
 }
 
 Buffer.prototype.readDoubleBE = function readDoubleBE (offset, noAssert) {
-  offset = offset >>> 0
   if (!noAssert) checkOffset(offset, 8, this.length)
   return ieee754.read(this, offset, false, 52, 8)
 }
@@ -8939,11 +8897,10 @@ function checkInt (buf, value, offset, ext, max, min) {
   if (offset + ext > buf.length) throw new RangeError('Index out of range')
 }
 
-Buffer.prototype.writeUintLE =
 Buffer.prototype.writeUIntLE = function writeUIntLE (value, offset, byteLength, noAssert) {
   value = +value
-  offset = offset >>> 0
-  byteLength = byteLength >>> 0
+  offset = offset | 0
+  byteLength = byteLength | 0
   if (!noAssert) {
     var maxBytes = Math.pow(2, 8 * byteLength) - 1
     checkInt(this, value, offset, byteLength, maxBytes, 0)
@@ -8959,11 +8916,10 @@ Buffer.prototype.writeUIntLE = function writeUIntLE (value, offset, byteLength, 
   return offset + byteLength
 }
 
-Buffer.prototype.writeUintBE =
 Buffer.prototype.writeUIntBE = function writeUIntBE (value, offset, byteLength, noAssert) {
   value = +value
-  offset = offset >>> 0
-  byteLength = byteLength >>> 0
+  offset = offset | 0
+  byteLength = byteLength | 0
   if (!noAssert) {
     var maxBytes = Math.pow(2, 8 * byteLength) - 1
     checkInt(this, value, offset, byteLength, maxBytes, 0)
@@ -8979,64 +8935,91 @@ Buffer.prototype.writeUIntBE = function writeUIntBE (value, offset, byteLength, 
   return offset + byteLength
 }
 
-Buffer.prototype.writeUint8 =
 Buffer.prototype.writeUInt8 = function writeUInt8 (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 1, 0xff, 0)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
   this[offset] = (value & 0xff)
   return offset + 1
 }
 
-Buffer.prototype.writeUint16LE =
+function objectWriteUInt16 (buf, value, offset, littleEndian) {
+  if (value < 0) value = 0xffff + value + 1
+  for (var i = 0, j = Math.min(buf.length - offset, 2); i < j; ++i) {
+    buf[offset + i] = (value & (0xff << (8 * (littleEndian ? i : 1 - i)))) >>>
+      (littleEndian ? i : 1 - i) * 8
+  }
+}
+
 Buffer.prototype.writeUInt16LE = function writeUInt16LE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 2, 0xffff, 0)
-  this[offset] = (value & 0xff)
-  this[offset + 1] = (value >>> 8)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value & 0xff)
+    this[offset + 1] = (value >>> 8)
+  } else {
+    objectWriteUInt16(this, value, offset, true)
+  }
   return offset + 2
 }
 
-Buffer.prototype.writeUint16BE =
 Buffer.prototype.writeUInt16BE = function writeUInt16BE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 2, 0xffff, 0)
-  this[offset] = (value >>> 8)
-  this[offset + 1] = (value & 0xff)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 8)
+    this[offset + 1] = (value & 0xff)
+  } else {
+    objectWriteUInt16(this, value, offset, false)
+  }
   return offset + 2
 }
 
-Buffer.prototype.writeUint32LE =
+function objectWriteUInt32 (buf, value, offset, littleEndian) {
+  if (value < 0) value = 0xffffffff + value + 1
+  for (var i = 0, j = Math.min(buf.length - offset, 4); i < j; ++i) {
+    buf[offset + i] = (value >>> (littleEndian ? i : 3 - i) * 8) & 0xff
+  }
+}
+
 Buffer.prototype.writeUInt32LE = function writeUInt32LE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 4, 0xffffffff, 0)
-  this[offset + 3] = (value >>> 24)
-  this[offset + 2] = (value >>> 16)
-  this[offset + 1] = (value >>> 8)
-  this[offset] = (value & 0xff)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset + 3] = (value >>> 24)
+    this[offset + 2] = (value >>> 16)
+    this[offset + 1] = (value >>> 8)
+    this[offset] = (value & 0xff)
+  } else {
+    objectWriteUInt32(this, value, offset, true)
+  }
   return offset + 4
 }
 
-Buffer.prototype.writeUint32BE =
 Buffer.prototype.writeUInt32BE = function writeUInt32BE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 4, 0xffffffff, 0)
-  this[offset] = (value >>> 24)
-  this[offset + 1] = (value >>> 16)
-  this[offset + 2] = (value >>> 8)
-  this[offset + 3] = (value & 0xff)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 24)
+    this[offset + 1] = (value >>> 16)
+    this[offset + 2] = (value >>> 8)
+    this[offset + 3] = (value & 0xff)
+  } else {
+    objectWriteUInt32(this, value, offset, false)
+  }
   return offset + 4
 }
 
 Buffer.prototype.writeIntLE = function writeIntLE (value, offset, byteLength, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) {
-    var limit = Math.pow(2, (8 * byteLength) - 1)
+    var limit = Math.pow(2, 8 * byteLength - 1)
 
     checkInt(this, value, offset, byteLength, limit - 1, -limit)
   }
@@ -9057,9 +9040,9 @@ Buffer.prototype.writeIntLE = function writeIntLE (value, offset, byteLength, no
 
 Buffer.prototype.writeIntBE = function writeIntBE (value, offset, byteLength, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) {
-    var limit = Math.pow(2, (8 * byteLength) - 1)
+    var limit = Math.pow(2, 8 * byteLength - 1)
 
     checkInt(this, value, offset, byteLength, limit - 1, -limit)
   }
@@ -9080,8 +9063,9 @@ Buffer.prototype.writeIntBE = function writeIntBE (value, offset, byteLength, no
 
 Buffer.prototype.writeInt8 = function writeInt8 (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 1, 0x7f, -0x80)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
   if (value < 0) value = 0xff + value + 1
   this[offset] = (value & 0xff)
   return offset + 1
@@ -9089,42 +9073,58 @@ Buffer.prototype.writeInt8 = function writeInt8 (value, offset, noAssert) {
 
 Buffer.prototype.writeInt16LE = function writeInt16LE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 2, 0x7fff, -0x8000)
-  this[offset] = (value & 0xff)
-  this[offset + 1] = (value >>> 8)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value & 0xff)
+    this[offset + 1] = (value >>> 8)
+  } else {
+    objectWriteUInt16(this, value, offset, true)
+  }
   return offset + 2
 }
 
 Buffer.prototype.writeInt16BE = function writeInt16BE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 2, 0x7fff, -0x8000)
-  this[offset] = (value >>> 8)
-  this[offset + 1] = (value & 0xff)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 8)
+    this[offset + 1] = (value & 0xff)
+  } else {
+    objectWriteUInt16(this, value, offset, false)
+  }
   return offset + 2
 }
 
 Buffer.prototype.writeInt32LE = function writeInt32LE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
-  this[offset] = (value & 0xff)
-  this[offset + 1] = (value >>> 8)
-  this[offset + 2] = (value >>> 16)
-  this[offset + 3] = (value >>> 24)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value & 0xff)
+    this[offset + 1] = (value >>> 8)
+    this[offset + 2] = (value >>> 16)
+    this[offset + 3] = (value >>> 24)
+  } else {
+    objectWriteUInt32(this, value, offset, true)
+  }
   return offset + 4
 }
 
 Buffer.prototype.writeInt32BE = function writeInt32BE (value, offset, noAssert) {
   value = +value
-  offset = offset >>> 0
+  offset = offset | 0
   if (!noAssert) checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
   if (value < 0) value = 0xffffffff + value + 1
-  this[offset] = (value >>> 24)
-  this[offset + 1] = (value >>> 16)
-  this[offset + 2] = (value >>> 8)
-  this[offset + 3] = (value & 0xff)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 24)
+    this[offset + 1] = (value >>> 16)
+    this[offset + 2] = (value >>> 8)
+    this[offset + 3] = (value & 0xff)
+  } else {
+    objectWriteUInt32(this, value, offset, false)
+  }
   return offset + 4
 }
 
@@ -9134,8 +9134,6 @@ function checkIEEE754 (buf, value, offset, ext, max, min) {
 }
 
 function writeFloat (buf, value, offset, littleEndian, noAssert) {
-  value = +value
-  offset = offset >>> 0
   if (!noAssert) {
     checkIEEE754(buf, value, offset, 4, 3.4028234663852886e+38, -3.4028234663852886e+38)
   }
@@ -9152,8 +9150,6 @@ Buffer.prototype.writeFloatBE = function writeFloatBE (value, offset, noAssert) 
 }
 
 function writeDouble (buf, value, offset, littleEndian, noAssert) {
-  value = +value
-  offset = offset >>> 0
   if (!noAssert) {
     checkIEEE754(buf, value, offset, 8, 1.7976931348623157E+308, -1.7976931348623157E+308)
   }
@@ -9171,7 +9167,6 @@ Buffer.prototype.writeDoubleBE = function writeDoubleBE (value, offset, noAssert
 
 // copy(targetBuffer, targetStart=0, sourceStart=0, sourceEnd=buffer.length)
 Buffer.prototype.copy = function copy (target, targetStart, start, end) {
-  if (!Buffer.isBuffer(target)) throw new TypeError('argument should be a Buffer')
   if (!start) start = 0
   if (!end && end !== 0) end = this.length
   if (targetStart >= target.length) targetStart = target.length
@@ -9186,7 +9181,7 @@ Buffer.prototype.copy = function copy (target, targetStart, start, end) {
   if (targetStart < 0) {
     throw new RangeError('targetStart out of bounds')
   }
-  if (start < 0 || start >= this.length) throw new RangeError('Index out of range')
+  if (start < 0 || start >= this.length) throw new RangeError('sourceStart out of bounds')
   if (end < 0) throw new RangeError('sourceEnd out of bounds')
 
   // Are we oob?
@@ -9196,14 +9191,22 @@ Buffer.prototype.copy = function copy (target, targetStart, start, end) {
   }
 
   var len = end - start
+  var i
 
-  if (this === target && typeof Uint8Array.prototype.copyWithin === 'function') {
-    // Use built-in when available, missing from IE11
-    this.copyWithin(targetStart, start, end)
+  if (this === target && start < targetStart && targetStart < end) {
+    // descending copy from end
+    for (i = len - 1; i >= 0; --i) {
+      target[i + targetStart] = this[i + start]
+    }
+  } else if (len < 1000 || !Buffer.TYPED_ARRAY_SUPPORT) {
+    // ascending copy from start
+    for (i = 0; i < len; ++i) {
+      target[i + targetStart] = this[i + start]
+    }
   } else {
     Uint8Array.prototype.set.call(
       target,
-      this.subarray(start, end),
+      this.subarray(start, start + len),
       targetStart
     )
   }
@@ -9226,24 +9229,20 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
       encoding = end
       end = this.length
     }
+    if (val.length === 1) {
+      var code = val.charCodeAt(0)
+      if (code < 256) {
+        val = code
+      }
+    }
     if (encoding !== undefined && typeof encoding !== 'string') {
       throw new TypeError('encoding must be a string')
     }
     if (typeof encoding === 'string' && !Buffer.isEncoding(encoding)) {
       throw new TypeError('Unknown encoding: ' + encoding)
     }
-    if (val.length === 1) {
-      var code = val.charCodeAt(0)
-      if ((encoding === 'utf8' && code < 128) ||
-          encoding === 'latin1') {
-        // Fast path: If `val` fits into a single byte, use that numeric value.
-        val = code
-      }
-    }
   } else if (typeof val === 'number') {
     val = val & 255
-  } else if (typeof val === 'boolean') {
-    val = Number(val)
   }
 
   // Invalid ranges are not set to a default, so can range check early.
@@ -9268,12 +9267,8 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
   } else {
     var bytes = Buffer.isBuffer(val)
       ? val
-      : Buffer.from(val, encoding)
+      : utf8ToBytes(new Buffer(val, encoding).toString())
     var len = bytes.length
-    if (len === 0) {
-      throw new TypeError('The value "' + val +
-        '" is invalid for argument "value"')
-    }
     for (i = 0; i < end - start; ++i) {
       this[i + start] = bytes[i % len]
     }
@@ -9285,13 +9280,11 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
 // HELPER FUNCTIONS
 // ================
 
-var INVALID_BASE64_RE = /[^+/0-9A-Za-z-_]/g
+var INVALID_BASE64_RE = /[^+\/0-9A-Za-z-_]/g
 
 function base64clean (str) {
-  // Node takes equal signs as end of the Base64 encoding
-  str = str.split('=')[0]
   // Node strips out invalid characters like \n and \t from the string, base64-js does not
-  str = str.trim().replace(INVALID_BASE64_RE, '')
+  str = stringtrim(str).replace(INVALID_BASE64_RE, '')
   // Node converts strings with length < 2 to ''
   if (str.length < 2) return ''
   // Node allows for non-padded base64 strings (missing trailing ===), base64-js does not
@@ -9299,6 +9292,16 @@ function base64clean (str) {
     str = str + '='
   }
   return str
+}
+
+function stringtrim (str) {
+  if (str.trim) return str.trim()
+  return str.replace(/^\s+|\s+$/g, '')
+}
+
+function toHex (n) {
+  if (n < 16) return '0' + n.toString(16)
+  return n.toString(16)
 }
 
 function utf8ToBytes (string, units) {
@@ -9418,34 +9421,11 @@ function blitBuffer (src, dst, offset, length) {
   return i
 }
 
-// ArrayBuffer or Uint8Array objects from other contexts (i.e. iframes) do not pass
-// the `instanceof` check but they should be treated as of that type.
-// See: https://github.com/feross/buffer/issues/166
-function isInstance (obj, type) {
-  return obj instanceof type ||
-    (obj != null && obj.constructor != null && obj.constructor.name != null &&
-      obj.constructor.name === type.name)
-}
-function numberIsNaN (obj) {
-  // For IE11 support
-  return obj !== obj // eslint-disable-line no-self-compare
+function isnan (val) {
+  return val !== val // eslint-disable-line no-self-compare
 }
 
-// Create lookup table for `toString('hex')`
-// See: https://github.com/feross/buffer/issues/219
-var hexSliceLookupTable = (function () {
-  var alphabet = '0123456789abcdef'
-  var table = new Array(256)
-  for (var i = 0; i < 16; ++i) {
-    var i16 = i * 16
-    for (var j = 0; j < 16; ++j) {
-      table[i16 + j] = alphabet[i] + alphabet[j]
-    }
-  }
-  return table
-})()
-
-},{"base64-js":"../../node_modules/base64-js/index.js","ieee754":"../../node_modules/ieee754/index.js","buffer":"../../node_modules/buffer/index.js"}],"../../node_modules/axios/lib/helpers/toFormData.js":[function(require,module,exports) {
+},{"base64-js":"../../node_modules/base64-js/index.js","ieee754":"../../node_modules/ieee754/index.js","isarray":"../../node_modules/isarray/index.js","buffer":"../../node_modules/node-libs-browser/node_modules/buffer/index.js"}],"../../node_modules/axios/lib/helpers/toFormData.js":[function(require,module,exports) {
 var Buffer = require("buffer").Buffer;
 'use strict';
 
@@ -9520,7 +9500,7 @@ function toFormData(obj, formData) {
 
 module.exports = toFormData;
 
-},{"../utils":"../../node_modules/axios/lib/utils.js","buffer":"../../node_modules/buffer/index.js"}],"../../node_modules/axios/lib/core/settle.js":[function(require,module,exports) {
+},{"../utils":"../../node_modules/axios/lib/utils.js","buffer":"../../node_modules/node-libs-browser/node_modules/buffer/index.js"}],"../../node_modules/axios/lib/core/settle.js":[function(require,module,exports) {
 'use strict';
 
 var AxiosError = require('./AxiosError');
@@ -11359,6 +11339,73 @@ var updateSettings = /*#__PURE__*/function () {
 }();
 
 exports.updateSettings = updateSettings;
+},{"axios":"../../node_modules/axios/index.js","./alerts":"alerts.js"}],"stripe.js":[function(require,module,exports) {
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.bookTour = void 0;
+
+var _axios = _interopRequireDefault(require("axios"));
+
+var _alerts = require("./alerts");
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function _typeof(obj) { "@babel/helpers - typeof"; return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (obj) { return typeof obj; } : function (obj) { return obj && "function" == typeof Symbol && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; }, _typeof(obj); }
+
+function _regeneratorRuntime() { "use strict"; /*! regenerator-runtime -- Copyright (c) 2014-present, Facebook, Inc. -- license (MIT): https://github.com/facebook/regenerator/blob/main/LICENSE */ _regeneratorRuntime = function _regeneratorRuntime() { return exports; }; var exports = {}, Op = Object.prototype, hasOwn = Op.hasOwnProperty, $Symbol = "function" == typeof Symbol ? Symbol : {}, iteratorSymbol = $Symbol.iterator || "@@iterator", asyncIteratorSymbol = $Symbol.asyncIterator || "@@asyncIterator", toStringTagSymbol = $Symbol.toStringTag || "@@toStringTag"; function define(obj, key, value) { return Object.defineProperty(obj, key, { value: value, enumerable: !0, configurable: !0, writable: !0 }), obj[key]; } try { define({}, ""); } catch (err) { define = function define(obj, key, value) { return obj[key] = value; }; } function wrap(innerFn, outerFn, self, tryLocsList) { var protoGenerator = outerFn && outerFn.prototype instanceof Generator ? outerFn : Generator, generator = Object.create(protoGenerator.prototype), context = new Context(tryLocsList || []); return generator._invoke = function (innerFn, self, context) { var state = "suspendedStart"; return function (method, arg) { if ("executing" === state) throw new Error("Generator is already running"); if ("completed" === state) { if ("throw" === method) throw arg; return doneResult(); } for (context.method = method, context.arg = arg;;) { var delegate = context.delegate; if (delegate) { var delegateResult = maybeInvokeDelegate(delegate, context); if (delegateResult) { if (delegateResult === ContinueSentinel) continue; return delegateResult; } } if ("next" === context.method) context.sent = context._sent = context.arg;else if ("throw" === context.method) { if ("suspendedStart" === state) throw state = "completed", context.arg; context.dispatchException(context.arg); } else "return" === context.method && context.abrupt("return", context.arg); state = "executing"; var record = tryCatch(innerFn, self, context); if ("normal" === record.type) { if (state = context.done ? "completed" : "suspendedYield", record.arg === ContinueSentinel) continue; return { value: record.arg, done: context.done }; } "throw" === record.type && (state = "completed", context.method = "throw", context.arg = record.arg); } }; }(innerFn, self, context), generator; } function tryCatch(fn, obj, arg) { try { return { type: "normal", arg: fn.call(obj, arg) }; } catch (err) { return { type: "throw", arg: err }; } } exports.wrap = wrap; var ContinueSentinel = {}; function Generator() {} function GeneratorFunction() {} function GeneratorFunctionPrototype() {} var IteratorPrototype = {}; define(IteratorPrototype, iteratorSymbol, function () { return this; }); var getProto = Object.getPrototypeOf, NativeIteratorPrototype = getProto && getProto(getProto(values([]))); NativeIteratorPrototype && NativeIteratorPrototype !== Op && hasOwn.call(NativeIteratorPrototype, iteratorSymbol) && (IteratorPrototype = NativeIteratorPrototype); var Gp = GeneratorFunctionPrototype.prototype = Generator.prototype = Object.create(IteratorPrototype); function defineIteratorMethods(prototype) { ["next", "throw", "return"].forEach(function (method) { define(prototype, method, function (arg) { return this._invoke(method, arg); }); }); } function AsyncIterator(generator, PromiseImpl) { function invoke(method, arg, resolve, reject) { var record = tryCatch(generator[method], generator, arg); if ("throw" !== record.type) { var result = record.arg, value = result.value; return value && "object" == _typeof(value) && hasOwn.call(value, "__await") ? PromiseImpl.resolve(value.__await).then(function (value) { invoke("next", value, resolve, reject); }, function (err) { invoke("throw", err, resolve, reject); }) : PromiseImpl.resolve(value).then(function (unwrapped) { result.value = unwrapped, resolve(result); }, function (error) { return invoke("throw", error, resolve, reject); }); } reject(record.arg); } var previousPromise; this._invoke = function (method, arg) { function callInvokeWithMethodAndArg() { return new PromiseImpl(function (resolve, reject) { invoke(method, arg, resolve, reject); }); } return previousPromise = previousPromise ? previousPromise.then(callInvokeWithMethodAndArg, callInvokeWithMethodAndArg) : callInvokeWithMethodAndArg(); }; } function maybeInvokeDelegate(delegate, context) { var method = delegate.iterator[context.method]; if (undefined === method) { if (context.delegate = null, "throw" === context.method) { if (delegate.iterator.return && (context.method = "return", context.arg = undefined, maybeInvokeDelegate(delegate, context), "throw" === context.method)) return ContinueSentinel; context.method = "throw", context.arg = new TypeError("The iterator does not provide a 'throw' method"); } return ContinueSentinel; } var record = tryCatch(method, delegate.iterator, context.arg); if ("throw" === record.type) return context.method = "throw", context.arg = record.arg, context.delegate = null, ContinueSentinel; var info = record.arg; return info ? info.done ? (context[delegate.resultName] = info.value, context.next = delegate.nextLoc, "return" !== context.method && (context.method = "next", context.arg = undefined), context.delegate = null, ContinueSentinel) : info : (context.method = "throw", context.arg = new TypeError("iterator result is not an object"), context.delegate = null, ContinueSentinel); } function pushTryEntry(locs) { var entry = { tryLoc: locs[0] }; 1 in locs && (entry.catchLoc = locs[1]), 2 in locs && (entry.finallyLoc = locs[2], entry.afterLoc = locs[3]), this.tryEntries.push(entry); } function resetTryEntry(entry) { var record = entry.completion || {}; record.type = "normal", delete record.arg, entry.completion = record; } function Context(tryLocsList) { this.tryEntries = [{ tryLoc: "root" }], tryLocsList.forEach(pushTryEntry, this), this.reset(!0); } function values(iterable) { if (iterable) { var iteratorMethod = iterable[iteratorSymbol]; if (iteratorMethod) return iteratorMethod.call(iterable); if ("function" == typeof iterable.next) return iterable; if (!isNaN(iterable.length)) { var i = -1, next = function next() { for (; ++i < iterable.length;) { if (hasOwn.call(iterable, i)) return next.value = iterable[i], next.done = !1, next; } return next.value = undefined, next.done = !0, next; }; return next.next = next; } } return { next: doneResult }; } function doneResult() { return { value: undefined, done: !0 }; } return GeneratorFunction.prototype = GeneratorFunctionPrototype, define(Gp, "constructor", GeneratorFunctionPrototype), define(GeneratorFunctionPrototype, "constructor", GeneratorFunction), GeneratorFunction.displayName = define(GeneratorFunctionPrototype, toStringTagSymbol, "GeneratorFunction"), exports.isGeneratorFunction = function (genFun) { var ctor = "function" == typeof genFun && genFun.constructor; return !!ctor && (ctor === GeneratorFunction || "GeneratorFunction" === (ctor.displayName || ctor.name)); }, exports.mark = function (genFun) { return Object.setPrototypeOf ? Object.setPrototypeOf(genFun, GeneratorFunctionPrototype) : (genFun.__proto__ = GeneratorFunctionPrototype, define(genFun, toStringTagSymbol, "GeneratorFunction")), genFun.prototype = Object.create(Gp), genFun; }, exports.awrap = function (arg) { return { __await: arg }; }, defineIteratorMethods(AsyncIterator.prototype), define(AsyncIterator.prototype, asyncIteratorSymbol, function () { return this; }), exports.AsyncIterator = AsyncIterator, exports.async = function (innerFn, outerFn, self, tryLocsList, PromiseImpl) { void 0 === PromiseImpl && (PromiseImpl = Promise); var iter = new AsyncIterator(wrap(innerFn, outerFn, self, tryLocsList), PromiseImpl); return exports.isGeneratorFunction(outerFn) ? iter : iter.next().then(function (result) { return result.done ? result.value : iter.next(); }); }, defineIteratorMethods(Gp), define(Gp, toStringTagSymbol, "Generator"), define(Gp, iteratorSymbol, function () { return this; }), define(Gp, "toString", function () { return "[object Generator]"; }), exports.keys = function (object) { var keys = []; for (var key in object) { keys.push(key); } return keys.reverse(), function next() { for (; keys.length;) { var key = keys.pop(); if (key in object) return next.value = key, next.done = !1, next; } return next.done = !0, next; }; }, exports.values = values, Context.prototype = { constructor: Context, reset: function reset(skipTempReset) { if (this.prev = 0, this.next = 0, this.sent = this._sent = undefined, this.done = !1, this.delegate = null, this.method = "next", this.arg = undefined, this.tryEntries.forEach(resetTryEntry), !skipTempReset) for (var name in this) { "t" === name.charAt(0) && hasOwn.call(this, name) && !isNaN(+name.slice(1)) && (this[name] = undefined); } }, stop: function stop() { this.done = !0; var rootRecord = this.tryEntries[0].completion; if ("throw" === rootRecord.type) throw rootRecord.arg; return this.rval; }, dispatchException: function dispatchException(exception) { if (this.done) throw exception; var context = this; function handle(loc, caught) { return record.type = "throw", record.arg = exception, context.next = loc, caught && (context.method = "next", context.arg = undefined), !!caught; } for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i], record = entry.completion; if ("root" === entry.tryLoc) return handle("end"); if (entry.tryLoc <= this.prev) { var hasCatch = hasOwn.call(entry, "catchLoc"), hasFinally = hasOwn.call(entry, "finallyLoc"); if (hasCatch && hasFinally) { if (this.prev < entry.catchLoc) return handle(entry.catchLoc, !0); if (this.prev < entry.finallyLoc) return handle(entry.finallyLoc); } else if (hasCatch) { if (this.prev < entry.catchLoc) return handle(entry.catchLoc, !0); } else { if (!hasFinally) throw new Error("try statement without catch or finally"); if (this.prev < entry.finallyLoc) return handle(entry.finallyLoc); } } } }, abrupt: function abrupt(type, arg) { for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i]; if (entry.tryLoc <= this.prev && hasOwn.call(entry, "finallyLoc") && this.prev < entry.finallyLoc) { var finallyEntry = entry; break; } } finallyEntry && ("break" === type || "continue" === type) && finallyEntry.tryLoc <= arg && arg <= finallyEntry.finallyLoc && (finallyEntry = null); var record = finallyEntry ? finallyEntry.completion : {}; return record.type = type, record.arg = arg, finallyEntry ? (this.method = "next", this.next = finallyEntry.finallyLoc, ContinueSentinel) : this.complete(record); }, complete: function complete(record, afterLoc) { if ("throw" === record.type) throw record.arg; return "break" === record.type || "continue" === record.type ? this.next = record.arg : "return" === record.type ? (this.rval = this.arg = record.arg, this.method = "return", this.next = "end") : "normal" === record.type && afterLoc && (this.next = afterLoc), ContinueSentinel; }, finish: function finish(finallyLoc) { for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i]; if (entry.finallyLoc === finallyLoc) return this.complete(entry.completion, entry.afterLoc), resetTryEntry(entry), ContinueSentinel; } }, catch: function _catch(tryLoc) { for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i]; if (entry.tryLoc === tryLoc) { var record = entry.completion; if ("throw" === record.type) { var thrown = record.arg; resetTryEntry(entry); } return thrown; } } throw new Error("illegal catch attempt"); }, delegateYield: function delegateYield(iterable, resultName, nextLoc) { return this.delegate = { iterator: values(iterable), resultName: resultName, nextLoc: nextLoc }, "next" === this.method && (this.arg = undefined), ContinueSentinel; } }, exports; }
+
+function asyncGeneratorStep(gen, resolve, reject, _next, _throw, key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { Promise.resolve(value).then(_next, _throw); } }
+
+function _asyncToGenerator(fn) { return function () { var self = this, args = arguments; return new Promise(function (resolve, reject) { var gen = fn.apply(self, args); function _next(value) { asyncGeneratorStep(gen, resolve, reject, _next, _throw, "next", value); } function _throw(err) { asyncGeneratorStep(gen, resolve, reject, _next, _throw, "throw", err); } _next(undefined); }); }; }
+
+var stripe = Stripe('pk_test_51L9nQvJLRd1BUR5iEMhCK3eOfJY4DDK8HlgmNVPc1KD5JTmP5x813UF0KA1MAabKuUEIJiLLnCwLTqduQicEzNk900UrqNdxWD');
+
+var bookTour = /*#__PURE__*/function () {
+  var _ref = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee(tourId) {
+    var session, _e$response$data;
+
+    return _regeneratorRuntime().wrap(function _callee$(_context) {
+      while (1) {
+        switch (_context.prev = _context.next) {
+          case 0:
+            _context.prev = 0;
+            _context.next = 3;
+            return (0, _axios.default)("http://localhost:8000/api/v1/bookings/checkout-session/".concat(tourId));
+
+          case 3:
+            session = _context.sent;
+            _context.next = 6;
+            return stripe.redirectToCheckout({
+              sessionId: session.data.session.id
+            });
+
+          case 6:
+            _context.next = 12;
+            break;
+
+          case 8:
+            _context.prev = 8;
+            _context.t0 = _context["catch"](0);
+            console.log(_context.t0);
+            (0, _alerts.showAlert)('error', ((_e$response$data = _context.t0.response.data) === null || _e$response$data === void 0 ? void 0 : _e$response$data.message) || _context.t0.message);
+
+          case 12:
+          case "end":
+            return _context.stop();
+        }
+      }
+    }, _callee, null, [[0, 8]]);
+  }));
+
+  return function bookTour(_x) {
+    return _ref.apply(this, arguments);
+  };
+}();
+
+exports.bookTour = bookTour;
 },{"axios":"../../node_modules/axios/index.js","./alerts":"alerts.js"}],"index.js":[function(require,module,exports) {
 "use strict";
 
@@ -11632,6 +11679,8 @@ var _mapbox = require("./mapbox");
 
 var _updateSettings = require("./updateSettings");
 
+var _stripe = require("./stripe");
+
 function _typeof(obj) { "@babel/helpers - typeof"; return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (obj) { return typeof obj; } : function (obj) { return obj && "function" == typeof Symbol && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; }, _typeof(obj); }
 
 function _regeneratorRuntime() { "use strict"; /*! regenerator-runtime -- Copyright (c) 2014-present, Facebook, Inc. -- license (MIT): https://github.com/facebook/regenerator/blob/main/LICENSE */ _regeneratorRuntime = function _regeneratorRuntime() { return exports; }; var exports = {}, Op = Object.prototype, hasOwn = Op.hasOwnProperty, $Symbol = "function" == typeof Symbol ? Symbol : {}, iteratorSymbol = $Symbol.iterator || "@@iterator", asyncIteratorSymbol = $Symbol.asyncIterator || "@@asyncIterator", toStringTagSymbol = $Symbol.toStringTag || "@@toStringTag"; function define(obj, key, value) { return Object.defineProperty(obj, key, { value: value, enumerable: !0, configurable: !0, writable: !0 }), obj[key]; } try { define({}, ""); } catch (err) { define = function define(obj, key, value) { return obj[key] = value; }; } function wrap(innerFn, outerFn, self, tryLocsList) { var protoGenerator = outerFn && outerFn.prototype instanceof Generator ? outerFn : Generator, generator = Object.create(protoGenerator.prototype), context = new Context(tryLocsList || []); return generator._invoke = function (innerFn, self, context) { var state = "suspendedStart"; return function (method, arg) { if ("executing" === state) throw new Error("Generator is already running"); if ("completed" === state) { if ("throw" === method) throw arg; return doneResult(); } for (context.method = method, context.arg = arg;;) { var delegate = context.delegate; if (delegate) { var delegateResult = maybeInvokeDelegate(delegate, context); if (delegateResult) { if (delegateResult === ContinueSentinel) continue; return delegateResult; } } if ("next" === context.method) context.sent = context._sent = context.arg;else if ("throw" === context.method) { if ("suspendedStart" === state) throw state = "completed", context.arg; context.dispatchException(context.arg); } else "return" === context.method && context.abrupt("return", context.arg); state = "executing"; var record = tryCatch(innerFn, self, context); if ("normal" === record.type) { if (state = context.done ? "completed" : "suspendedYield", record.arg === ContinueSentinel) continue; return { value: record.arg, done: context.done }; } "throw" === record.type && (state = "completed", context.method = "throw", context.arg = record.arg); } }; }(innerFn, self, context), generator; } function tryCatch(fn, obj, arg) { try { return { type: "normal", arg: fn.call(obj, arg) }; } catch (err) { return { type: "throw", arg: err }; } } exports.wrap = wrap; var ContinueSentinel = {}; function Generator() {} function GeneratorFunction() {} function GeneratorFunctionPrototype() {} var IteratorPrototype = {}; define(IteratorPrototype, iteratorSymbol, function () { return this; }); var getProto = Object.getPrototypeOf, NativeIteratorPrototype = getProto && getProto(getProto(values([]))); NativeIteratorPrototype && NativeIteratorPrototype !== Op && hasOwn.call(NativeIteratorPrototype, iteratorSymbol) && (IteratorPrototype = NativeIteratorPrototype); var Gp = GeneratorFunctionPrototype.prototype = Generator.prototype = Object.create(IteratorPrototype); function defineIteratorMethods(prototype) { ["next", "throw", "return"].forEach(function (method) { define(prototype, method, function (arg) { return this._invoke(method, arg); }); }); } function AsyncIterator(generator, PromiseImpl) { function invoke(method, arg, resolve, reject) { var record = tryCatch(generator[method], generator, arg); if ("throw" !== record.type) { var result = record.arg, value = result.value; return value && "object" == _typeof(value) && hasOwn.call(value, "__await") ? PromiseImpl.resolve(value.__await).then(function (value) { invoke("next", value, resolve, reject); }, function (err) { invoke("throw", err, resolve, reject); }) : PromiseImpl.resolve(value).then(function (unwrapped) { result.value = unwrapped, resolve(result); }, function (error) { return invoke("throw", error, resolve, reject); }); } reject(record.arg); } var previousPromise; this._invoke = function (method, arg) { function callInvokeWithMethodAndArg() { return new PromiseImpl(function (resolve, reject) { invoke(method, arg, resolve, reject); }); } return previousPromise = previousPromise ? previousPromise.then(callInvokeWithMethodAndArg, callInvokeWithMethodAndArg) : callInvokeWithMethodAndArg(); }; } function maybeInvokeDelegate(delegate, context) { var method = delegate.iterator[context.method]; if (undefined === method) { if (context.delegate = null, "throw" === context.method) { if (delegate.iterator.return && (context.method = "return", context.arg = undefined, maybeInvokeDelegate(delegate, context), "throw" === context.method)) return ContinueSentinel; context.method = "throw", context.arg = new TypeError("The iterator does not provide a 'throw' method"); } return ContinueSentinel; } var record = tryCatch(method, delegate.iterator, context.arg); if ("throw" === record.type) return context.method = "throw", context.arg = record.arg, context.delegate = null, ContinueSentinel; var info = record.arg; return info ? info.done ? (context[delegate.resultName] = info.value, context.next = delegate.nextLoc, "return" !== context.method && (context.method = "next", context.arg = undefined), context.delegate = null, ContinueSentinel) : info : (context.method = "throw", context.arg = new TypeError("iterator result is not an object"), context.delegate = null, ContinueSentinel); } function pushTryEntry(locs) { var entry = { tryLoc: locs[0] }; 1 in locs && (entry.catchLoc = locs[1]), 2 in locs && (entry.finallyLoc = locs[2], entry.afterLoc = locs[3]), this.tryEntries.push(entry); } function resetTryEntry(entry) { var record = entry.completion || {}; record.type = "normal", delete record.arg, entry.completion = record; } function Context(tryLocsList) { this.tryEntries = [{ tryLoc: "root" }], tryLocsList.forEach(pushTryEntry, this), this.reset(!0); } function values(iterable) { if (iterable) { var iteratorMethod = iterable[iteratorSymbol]; if (iteratorMethod) return iteratorMethod.call(iterable); if ("function" == typeof iterable.next) return iterable; if (!isNaN(iterable.length)) { var i = -1, next = function next() { for (; ++i < iterable.length;) { if (hasOwn.call(iterable, i)) return next.value = iterable[i], next.done = !1, next; } return next.value = undefined, next.done = !0, next; }; return next.next = next; } } return { next: doneResult }; } function doneResult() { return { value: undefined, done: !0 }; } return GeneratorFunction.prototype = GeneratorFunctionPrototype, define(Gp, "constructor", GeneratorFunctionPrototype), define(GeneratorFunctionPrototype, "constructor", GeneratorFunction), GeneratorFunction.displayName = define(GeneratorFunctionPrototype, toStringTagSymbol, "GeneratorFunction"), exports.isGeneratorFunction = function (genFun) { var ctor = "function" == typeof genFun && genFun.constructor; return !!ctor && (ctor === GeneratorFunction || "GeneratorFunction" === (ctor.displayName || ctor.name)); }, exports.mark = function (genFun) { return Object.setPrototypeOf ? Object.setPrototypeOf(genFun, GeneratorFunctionPrototype) : (genFun.__proto__ = GeneratorFunctionPrototype, define(genFun, toStringTagSymbol, "GeneratorFunction")), genFun.prototype = Object.create(Gp), genFun; }, exports.awrap = function (arg) { return { __await: arg }; }, defineIteratorMethods(AsyncIterator.prototype), define(AsyncIterator.prototype, asyncIteratorSymbol, function () { return this; }), exports.AsyncIterator = AsyncIterator, exports.async = function (innerFn, outerFn, self, tryLocsList, PromiseImpl) { void 0 === PromiseImpl && (PromiseImpl = Promise); var iter = new AsyncIterator(wrap(innerFn, outerFn, self, tryLocsList), PromiseImpl); return exports.isGeneratorFunction(outerFn) ? iter : iter.next().then(function (result) { return result.done ? result.value : iter.next(); }); }, defineIteratorMethods(Gp), define(Gp, toStringTagSymbol, "Generator"), define(Gp, iteratorSymbol, function () { return this; }), define(Gp, "toString", function () { return "[object Generator]"; }), exports.keys = function (object) { var keys = []; for (var key in object) { keys.push(key); } return keys.reverse(), function next() { for (; keys.length;) { var key = keys.pop(); if (key in object) return next.value = key, next.done = !1, next; } return next.done = !0, next; }; }, exports.values = values, Context.prototype = { constructor: Context, reset: function reset(skipTempReset) { if (this.prev = 0, this.next = 0, this.sent = this._sent = undefined, this.done = !1, this.delegate = null, this.method = "next", this.arg = undefined, this.tryEntries.forEach(resetTryEntry), !skipTempReset) for (var name in this) { "t" === name.charAt(0) && hasOwn.call(this, name) && !isNaN(+name.slice(1)) && (this[name] = undefined); } }, stop: function stop() { this.done = !0; var rootRecord = this.tryEntries[0].completion; if ("throw" === rootRecord.type) throw rootRecord.arg; return this.rval; }, dispatchException: function dispatchException(exception) { if (this.done) throw exception; var context = this; function handle(loc, caught) { return record.type = "throw", record.arg = exception, context.next = loc, caught && (context.method = "next", context.arg = undefined), !!caught; } for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i], record = entry.completion; if ("root" === entry.tryLoc) return handle("end"); if (entry.tryLoc <= this.prev) { var hasCatch = hasOwn.call(entry, "catchLoc"), hasFinally = hasOwn.call(entry, "finallyLoc"); if (hasCatch && hasFinally) { if (this.prev < entry.catchLoc) return handle(entry.catchLoc, !0); if (this.prev < entry.finallyLoc) return handle(entry.finallyLoc); } else if (hasCatch) { if (this.prev < entry.catchLoc) return handle(entry.catchLoc, !0); } else { if (!hasFinally) throw new Error("try statement without catch or finally"); if (this.prev < entry.finallyLoc) return handle(entry.finallyLoc); } } } }, abrupt: function abrupt(type, arg) { for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i]; if (entry.tryLoc <= this.prev && hasOwn.call(entry, "finallyLoc") && this.prev < entry.finallyLoc) { var finallyEntry = entry; break; } } finallyEntry && ("break" === type || "continue" === type) && finallyEntry.tryLoc <= arg && arg <= finallyEntry.finallyLoc && (finallyEntry = null); var record = finallyEntry ? finallyEntry.completion : {}; return record.type = type, record.arg = arg, finallyEntry ? (this.method = "next", this.next = finallyEntry.finallyLoc, ContinueSentinel) : this.complete(record); }, complete: function complete(record, afterLoc) { if ("throw" === record.type) throw record.arg; return "break" === record.type || "continue" === record.type ? this.next = record.arg : "return" === record.type ? (this.rval = this.arg = record.arg, this.method = "return", this.next = "end") : "normal" === record.type && afterLoc && (this.next = afterLoc), ContinueSentinel; }, finish: function finish(finallyLoc) { for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i]; if (entry.finallyLoc === finallyLoc) return this.complete(entry.completion, entry.afterLoc), resetTryEntry(entry), ContinueSentinel; } }, catch: function _catch(tryLoc) { for (var i = this.tryEntries.length - 1; i >= 0; --i) { var entry = this.tryEntries[i]; if (entry.tryLoc === tryLoc) { var record = entry.completion; if ("throw" === record.type) { var thrown = record.arg; resetTryEntry(entry); } return thrown; } } throw new Error("illegal catch attempt"); }, delegateYield: function delegateYield(iterable, resultName, nextLoc) { return this.delegate = { iterator: values(iterable), resultName: resultName, nextLoc: nextLoc }, "next" === this.method && (this.arg = undefined), ContinueSentinel; } }, exports; }
@@ -11641,6 +11690,7 @@ function asyncGeneratorStep(gen, resolve, reject, _next, _throw, key, arg) { try
 function _asyncToGenerator(fn) { return function () { var self = this, args = arguments; return new Promise(function (resolve, reject) { var gen = fn.apply(self, args); function _next(value) { asyncGeneratorStep(gen, resolve, reject, _next, _throw, "next", value); } function _throw(err) { asyncGeneratorStep(gen, resolve, reject, _next, _throw, "throw", err); } _next(undefined); }); }; }
 
 var mapBox = document.getElementById('map');
+var bookBtn = document.getElementById('book-tour');
 var loginForm = document.querySelector('#login');
 var settingsForm = document.querySelector('.form-user-data');
 var passwordForm = document.querySelector('.form-user-settings');
@@ -11724,7 +11774,34 @@ if (passwordForm) {
 
 
 if (logOutBtn) logOutBtn.addEventListener('click', _login.logout);
-},{"core-js/modules/es6.array.copy-within.js":"../../node_modules/core-js/modules/es6.array.copy-within.js","core-js/modules/es6.array.fill.js":"../../node_modules/core-js/modules/es6.array.fill.js","core-js/modules/es6.array.filter.js":"../../node_modules/core-js/modules/es6.array.filter.js","core-js/modules/es6.array.find.js":"../../node_modules/core-js/modules/es6.array.find.js","core-js/modules/es6.array.find-index.js":"../../node_modules/core-js/modules/es6.array.find-index.js","core-js/modules/es7.array.flat-map.js":"../../node_modules/core-js/modules/es7.array.flat-map.js","core-js/modules/es6.array.from.js":"../../node_modules/core-js/modules/es6.array.from.js","core-js/modules/es7.array.includes.js":"../../node_modules/core-js/modules/es7.array.includes.js","core-js/modules/es6.array.iterator.js":"../../node_modules/core-js/modules/es6.array.iterator.js","core-js/modules/es6.array.map.js":"../../node_modules/core-js/modules/es6.array.map.js","core-js/modules/es6.array.of.js":"../../node_modules/core-js/modules/es6.array.of.js","core-js/modules/es6.array.slice.js":"../../node_modules/core-js/modules/es6.array.slice.js","core-js/modules/es6.array.sort.js":"../../node_modules/core-js/modules/es6.array.sort.js","core-js/modules/es6.array.species.js":"../../node_modules/core-js/modules/es6.array.species.js","core-js/modules/es6.date.to-primitive.js":"../../node_modules/core-js/modules/es6.date.to-primitive.js","core-js/modules/es6.function.has-instance.js":"../../node_modules/core-js/modules/es6.function.has-instance.js","core-js/modules/es6.function.name.js":"../../node_modules/core-js/modules/es6.function.name.js","core-js/modules/es6.map.js":"../../node_modules/core-js/modules/es6.map.js","core-js/modules/es6.math.acosh.js":"../../node_modules/core-js/modules/es6.math.acosh.js","core-js/modules/es6.math.asinh.js":"../../node_modules/core-js/modules/es6.math.asinh.js","core-js/modules/es6.math.atanh.js":"../../node_modules/core-js/modules/es6.math.atanh.js","core-js/modules/es6.math.cbrt.js":"../../node_modules/core-js/modules/es6.math.cbrt.js","core-js/modules/es6.math.clz32.js":"../../node_modules/core-js/modules/es6.math.clz32.js","core-js/modules/es6.math.cosh.js":"../../node_modules/core-js/modules/es6.math.cosh.js","core-js/modules/es6.math.expm1.js":"../../node_modules/core-js/modules/es6.math.expm1.js","core-js/modules/es6.math.fround.js":"../../node_modules/core-js/modules/es6.math.fround.js","core-js/modules/es6.math.hypot.js":"../../node_modules/core-js/modules/es6.math.hypot.js","core-js/modules/es6.math.imul.js":"../../node_modules/core-js/modules/es6.math.imul.js","core-js/modules/es6.math.log1p.js":"../../node_modules/core-js/modules/es6.math.log1p.js","core-js/modules/es6.math.log10.js":"../../node_modules/core-js/modules/es6.math.log10.js","core-js/modules/es6.math.log2.js":"../../node_modules/core-js/modules/es6.math.log2.js","core-js/modules/es6.math.sign.js":"../../node_modules/core-js/modules/es6.math.sign.js","core-js/modules/es6.math.sinh.js":"../../node_modules/core-js/modules/es6.math.sinh.js","core-js/modules/es6.math.tanh.js":"../../node_modules/core-js/modules/es6.math.tanh.js","core-js/modules/es6.math.trunc.js":"../../node_modules/core-js/modules/es6.math.trunc.js","core-js/modules/es6.number.constructor.js":"../../node_modules/core-js/modules/es6.number.constructor.js","core-js/modules/es6.number.epsilon.js":"../../node_modules/core-js/modules/es6.number.epsilon.js","core-js/modules/es6.number.is-finite.js":"../../node_modules/core-js/modules/es6.number.is-finite.js","core-js/modules/es6.number.is-integer.js":"../../node_modules/core-js/modules/es6.number.is-integer.js","core-js/modules/es6.number.is-nan.js":"../../node_modules/core-js/modules/es6.number.is-nan.js","core-js/modules/es6.number.is-safe-integer.js":"../../node_modules/core-js/modules/es6.number.is-safe-integer.js","core-js/modules/es6.number.max-safe-integer.js":"../../node_modules/core-js/modules/es6.number.max-safe-integer.js","core-js/modules/es6.number.min-safe-integer.js":"../../node_modules/core-js/modules/es6.number.min-safe-integer.js","core-js/modules/es6.number.parse-float.js":"../../node_modules/core-js/modules/es6.number.parse-float.js","core-js/modules/es6.number.parse-int.js":"../../node_modules/core-js/modules/es6.number.parse-int.js","core-js/modules/es6.object.assign.js":"../../node_modules/core-js/modules/es6.object.assign.js","core-js/modules/es7.object.define-getter.js":"../../node_modules/core-js/modules/es7.object.define-getter.js","core-js/modules/es7.object.define-setter.js":"../../node_modules/core-js/modules/es7.object.define-setter.js","core-js/modules/es7.object.entries.js":"../../node_modules/core-js/modules/es7.object.entries.js","core-js/modules/es6.object.freeze.js":"../../node_modules/core-js/modules/es6.object.freeze.js","core-js/modules/es6.object.get-own-property-descriptor.js":"../../node_modules/core-js/modules/es6.object.get-own-property-descriptor.js","core-js/modules/es7.object.get-own-property-descriptors.js":"../../node_modules/core-js/modules/es7.object.get-own-property-descriptors.js","core-js/modules/es6.object.get-own-property-names.js":"../../node_modules/core-js/modules/es6.object.get-own-property-names.js","core-js/modules/es6.object.get-prototype-of.js":"../../node_modules/core-js/modules/es6.object.get-prototype-of.js","core-js/modules/es7.object.lookup-getter.js":"../../node_modules/core-js/modules/es7.object.lookup-getter.js","core-js/modules/es7.object.lookup-setter.js":"../../node_modules/core-js/modules/es7.object.lookup-setter.js","core-js/modules/es6.object.prevent-extensions.js":"../../node_modules/core-js/modules/es6.object.prevent-extensions.js","core-js/modules/es6.object.to-string.js":"../../node_modules/core-js/modules/es6.object.to-string.js","core-js/modules/es6.object.is.js":"../../node_modules/core-js/modules/es6.object.is.js","core-js/modules/es6.object.is-frozen.js":"../../node_modules/core-js/modules/es6.object.is-frozen.js","core-js/modules/es6.object.is-sealed.js":"../../node_modules/core-js/modules/es6.object.is-sealed.js","core-js/modules/es6.object.is-extensible.js":"../../node_modules/core-js/modules/es6.object.is-extensible.js","core-js/modules/es6.object.keys.js":"../../node_modules/core-js/modules/es6.object.keys.js","core-js/modules/es6.object.seal.js":"../../node_modules/core-js/modules/es6.object.seal.js","core-js/modules/es6.object.set-prototype-of.js":"../../node_modules/core-js/modules/es6.object.set-prototype-of.js","core-js/modules/es7.object.values.js":"../../node_modules/core-js/modules/es7.object.values.js","core-js/modules/es6.promise.js":"../../node_modules/core-js/modules/es6.promise.js","core-js/modules/es7.promise.finally.js":"../../node_modules/core-js/modules/es7.promise.finally.js","core-js/modules/es6.reflect.apply.js":"../../node_modules/core-js/modules/es6.reflect.apply.js","core-js/modules/es6.reflect.construct.js":"../../node_modules/core-js/modules/es6.reflect.construct.js","core-js/modules/es6.reflect.define-property.js":"../../node_modules/core-js/modules/es6.reflect.define-property.js","core-js/modules/es6.reflect.delete-property.js":"../../node_modules/core-js/modules/es6.reflect.delete-property.js","core-js/modules/es6.reflect.get.js":"../../node_modules/core-js/modules/es6.reflect.get.js","core-js/modules/es6.reflect.get-own-property-descriptor.js":"../../node_modules/core-js/modules/es6.reflect.get-own-property-descriptor.js","core-js/modules/es6.reflect.get-prototype-of.js":"../../node_modules/core-js/modules/es6.reflect.get-prototype-of.js","core-js/modules/es6.reflect.has.js":"../../node_modules/core-js/modules/es6.reflect.has.js","core-js/modules/es6.reflect.is-extensible.js":"../../node_modules/core-js/modules/es6.reflect.is-extensible.js","core-js/modules/es6.reflect.own-keys.js":"../../node_modules/core-js/modules/es6.reflect.own-keys.js","core-js/modules/es6.reflect.prevent-extensions.js":"../../node_modules/core-js/modules/es6.reflect.prevent-extensions.js","core-js/modules/es6.reflect.set.js":"../../node_modules/core-js/modules/es6.reflect.set.js","core-js/modules/es6.reflect.set-prototype-of.js":"../../node_modules/core-js/modules/es6.reflect.set-prototype-of.js","core-js/modules/es6.regexp.constructor.js":"../../node_modules/core-js/modules/es6.regexp.constructor.js","core-js/modules/es6.regexp.flags.js":"../../node_modules/core-js/modules/es6.regexp.flags.js","core-js/modules/es6.regexp.match.js":"../../node_modules/core-js/modules/es6.regexp.match.js","core-js/modules/es6.regexp.replace.js":"../../node_modules/core-js/modules/es6.regexp.replace.js","core-js/modules/es6.regexp.split.js":"../../node_modules/core-js/modules/es6.regexp.split.js","core-js/modules/es6.regexp.search.js":"../../node_modules/core-js/modules/es6.regexp.search.js","core-js/modules/es6.regexp.to-string.js":"../../node_modules/core-js/modules/es6.regexp.to-string.js","core-js/modules/es6.set.js":"../../node_modules/core-js/modules/es6.set.js","core-js/modules/es6.symbol.js":"../../node_modules/core-js/modules/es6.symbol.js","core-js/modules/es7.symbol.async-iterator.js":"../../node_modules/core-js/modules/es7.symbol.async-iterator.js","core-js/modules/es6.string.anchor.js":"../../node_modules/core-js/modules/es6.string.anchor.js","core-js/modules/es6.string.big.js":"../../node_modules/core-js/modules/es6.string.big.js","core-js/modules/es6.string.blink.js":"../../node_modules/core-js/modules/es6.string.blink.js","core-js/modules/es6.string.bold.js":"../../node_modules/core-js/modules/es6.string.bold.js","core-js/modules/es6.string.code-point-at.js":"../../node_modules/core-js/modules/es6.string.code-point-at.js","core-js/modules/es6.string.ends-with.js":"../../node_modules/core-js/modules/es6.string.ends-with.js","core-js/modules/es6.string.fixed.js":"../../node_modules/core-js/modules/es6.string.fixed.js","core-js/modules/es6.string.fontcolor.js":"../../node_modules/core-js/modules/es6.string.fontcolor.js","core-js/modules/es6.string.fontsize.js":"../../node_modules/core-js/modules/es6.string.fontsize.js","core-js/modules/es6.string.from-code-point.js":"../../node_modules/core-js/modules/es6.string.from-code-point.js","core-js/modules/es6.string.includes.js":"../../node_modules/core-js/modules/es6.string.includes.js","core-js/modules/es6.string.italics.js":"../../node_modules/core-js/modules/es6.string.italics.js","core-js/modules/es6.string.iterator.js":"../../node_modules/core-js/modules/es6.string.iterator.js","core-js/modules/es6.string.link.js":"../../node_modules/core-js/modules/es6.string.link.js","core-js/modules/es7.string.pad-start.js":"../../node_modules/core-js/modules/es7.string.pad-start.js","core-js/modules/es7.string.pad-end.js":"../../node_modules/core-js/modules/es7.string.pad-end.js","core-js/modules/es6.string.raw.js":"../../node_modules/core-js/modules/es6.string.raw.js","core-js/modules/es6.string.repeat.js":"../../node_modules/core-js/modules/es6.string.repeat.js","core-js/modules/es6.string.small.js":"../../node_modules/core-js/modules/es6.string.small.js","core-js/modules/es6.string.starts-with.js":"../../node_modules/core-js/modules/es6.string.starts-with.js","core-js/modules/es6.string.strike.js":"../../node_modules/core-js/modules/es6.string.strike.js","core-js/modules/es6.string.sub.js":"../../node_modules/core-js/modules/es6.string.sub.js","core-js/modules/es6.string.sup.js":"../../node_modules/core-js/modules/es6.string.sup.js","core-js/modules/es7.string.trim-left.js":"../../node_modules/core-js/modules/es7.string.trim-left.js","core-js/modules/es7.string.trim-right.js":"../../node_modules/core-js/modules/es7.string.trim-right.js","core-js/modules/es6.typed.array-buffer.js":"../../node_modules/core-js/modules/es6.typed.array-buffer.js","core-js/modules/es6.typed.int8-array.js":"../../node_modules/core-js/modules/es6.typed.int8-array.js","core-js/modules/es6.typed.uint8-array.js":"../../node_modules/core-js/modules/es6.typed.uint8-array.js","core-js/modules/es6.typed.uint8-clamped-array.js":"../../node_modules/core-js/modules/es6.typed.uint8-clamped-array.js","core-js/modules/es6.typed.int16-array.js":"../../node_modules/core-js/modules/es6.typed.int16-array.js","core-js/modules/es6.typed.uint16-array.js":"../../node_modules/core-js/modules/es6.typed.uint16-array.js","core-js/modules/es6.typed.int32-array.js":"../../node_modules/core-js/modules/es6.typed.int32-array.js","core-js/modules/es6.typed.uint32-array.js":"../../node_modules/core-js/modules/es6.typed.uint32-array.js","core-js/modules/es6.typed.float32-array.js":"../../node_modules/core-js/modules/es6.typed.float32-array.js","core-js/modules/es6.typed.float64-array.js":"../../node_modules/core-js/modules/es6.typed.float64-array.js","core-js/modules/es6.weak-map.js":"../../node_modules/core-js/modules/es6.weak-map.js","core-js/modules/es6.weak-set.js":"../../node_modules/core-js/modules/es6.weak-set.js","core-js/modules/web.timers.js":"../../node_modules/core-js/modules/web.timers.js","core-js/modules/web.immediate.js":"../../node_modules/core-js/modules/web.immediate.js","core-js/modules/web.dom.iterable.js":"../../node_modules/core-js/modules/web.dom.iterable.js","regenerator-runtime/runtime.js":"../../node_modules/regenerator-runtime/runtime.js","./login":"login.js","./mapbox":"mapbox.js","./updateSettings":"updateSettings.js"}],"../../node_modules/parcel-bundler/src/builtins/hmr-runtime.js":[function(require,module,exports) {
+if (bookBtn) bookBtn.addEventListener('click', /*#__PURE__*/function () {
+  var _ref2 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee2(e) {
+    var tourId;
+    return _regeneratorRuntime().wrap(function _callee2$(_context2) {
+      while (1) {
+        switch (_context2.prev = _context2.next) {
+          case 0:
+            e.target.textContent = 'Processing...';
+            tourId = e.target.dataset.tourId;
+            _context2.next = 4;
+            return (0, _stripe.bookTour)(tourId);
+
+          case 4:
+            e.target.textContent = 'Book tour now!';
+
+          case 5:
+          case "end":
+            return _context2.stop();
+        }
+      }
+    }, _callee2);
+  }));
+
+  return function (_x2) {
+    return _ref2.apply(this, arguments);
+  };
+}());
+},{"core-js/modules/es6.array.copy-within.js":"../../node_modules/core-js/modules/es6.array.copy-within.js","core-js/modules/es6.array.fill.js":"../../node_modules/core-js/modules/es6.array.fill.js","core-js/modules/es6.array.filter.js":"../../node_modules/core-js/modules/es6.array.filter.js","core-js/modules/es6.array.find.js":"../../node_modules/core-js/modules/es6.array.find.js","core-js/modules/es6.array.find-index.js":"../../node_modules/core-js/modules/es6.array.find-index.js","core-js/modules/es7.array.flat-map.js":"../../node_modules/core-js/modules/es7.array.flat-map.js","core-js/modules/es6.array.from.js":"../../node_modules/core-js/modules/es6.array.from.js","core-js/modules/es7.array.includes.js":"../../node_modules/core-js/modules/es7.array.includes.js","core-js/modules/es6.array.iterator.js":"../../node_modules/core-js/modules/es6.array.iterator.js","core-js/modules/es6.array.map.js":"../../node_modules/core-js/modules/es6.array.map.js","core-js/modules/es6.array.of.js":"../../node_modules/core-js/modules/es6.array.of.js","core-js/modules/es6.array.slice.js":"../../node_modules/core-js/modules/es6.array.slice.js","core-js/modules/es6.array.sort.js":"../../node_modules/core-js/modules/es6.array.sort.js","core-js/modules/es6.array.species.js":"../../node_modules/core-js/modules/es6.array.species.js","core-js/modules/es6.date.to-primitive.js":"../../node_modules/core-js/modules/es6.date.to-primitive.js","core-js/modules/es6.function.has-instance.js":"../../node_modules/core-js/modules/es6.function.has-instance.js","core-js/modules/es6.function.name.js":"../../node_modules/core-js/modules/es6.function.name.js","core-js/modules/es6.map.js":"../../node_modules/core-js/modules/es6.map.js","core-js/modules/es6.math.acosh.js":"../../node_modules/core-js/modules/es6.math.acosh.js","core-js/modules/es6.math.asinh.js":"../../node_modules/core-js/modules/es6.math.asinh.js","core-js/modules/es6.math.atanh.js":"../../node_modules/core-js/modules/es6.math.atanh.js","core-js/modules/es6.math.cbrt.js":"../../node_modules/core-js/modules/es6.math.cbrt.js","core-js/modules/es6.math.clz32.js":"../../node_modules/core-js/modules/es6.math.clz32.js","core-js/modules/es6.math.cosh.js":"../../node_modules/core-js/modules/es6.math.cosh.js","core-js/modules/es6.math.expm1.js":"../../node_modules/core-js/modules/es6.math.expm1.js","core-js/modules/es6.math.fround.js":"../../node_modules/core-js/modules/es6.math.fround.js","core-js/modules/es6.math.hypot.js":"../../node_modules/core-js/modules/es6.math.hypot.js","core-js/modules/es6.math.imul.js":"../../node_modules/core-js/modules/es6.math.imul.js","core-js/modules/es6.math.log1p.js":"../../node_modules/core-js/modules/es6.math.log1p.js","core-js/modules/es6.math.log10.js":"../../node_modules/core-js/modules/es6.math.log10.js","core-js/modules/es6.math.log2.js":"../../node_modules/core-js/modules/es6.math.log2.js","core-js/modules/es6.math.sign.js":"../../node_modules/core-js/modules/es6.math.sign.js","core-js/modules/es6.math.sinh.js":"../../node_modules/core-js/modules/es6.math.sinh.js","core-js/modules/es6.math.tanh.js":"../../node_modules/core-js/modules/es6.math.tanh.js","core-js/modules/es6.math.trunc.js":"../../node_modules/core-js/modules/es6.math.trunc.js","core-js/modules/es6.number.constructor.js":"../../node_modules/core-js/modules/es6.number.constructor.js","core-js/modules/es6.number.epsilon.js":"../../node_modules/core-js/modules/es6.number.epsilon.js","core-js/modules/es6.number.is-finite.js":"../../node_modules/core-js/modules/es6.number.is-finite.js","core-js/modules/es6.number.is-integer.js":"../../node_modules/core-js/modules/es6.number.is-integer.js","core-js/modules/es6.number.is-nan.js":"../../node_modules/core-js/modules/es6.number.is-nan.js","core-js/modules/es6.number.is-safe-integer.js":"../../node_modules/core-js/modules/es6.number.is-safe-integer.js","core-js/modules/es6.number.max-safe-integer.js":"../../node_modules/core-js/modules/es6.number.max-safe-integer.js","core-js/modules/es6.number.min-safe-integer.js":"../../node_modules/core-js/modules/es6.number.min-safe-integer.js","core-js/modules/es6.number.parse-float.js":"../../node_modules/core-js/modules/es6.number.parse-float.js","core-js/modules/es6.number.parse-int.js":"../../node_modules/core-js/modules/es6.number.parse-int.js","core-js/modules/es6.object.assign.js":"../../node_modules/core-js/modules/es6.object.assign.js","core-js/modules/es7.object.define-getter.js":"../../node_modules/core-js/modules/es7.object.define-getter.js","core-js/modules/es7.object.define-setter.js":"../../node_modules/core-js/modules/es7.object.define-setter.js","core-js/modules/es7.object.entries.js":"../../node_modules/core-js/modules/es7.object.entries.js","core-js/modules/es6.object.freeze.js":"../../node_modules/core-js/modules/es6.object.freeze.js","core-js/modules/es6.object.get-own-property-descriptor.js":"../../node_modules/core-js/modules/es6.object.get-own-property-descriptor.js","core-js/modules/es7.object.get-own-property-descriptors.js":"../../node_modules/core-js/modules/es7.object.get-own-property-descriptors.js","core-js/modules/es6.object.get-own-property-names.js":"../../node_modules/core-js/modules/es6.object.get-own-property-names.js","core-js/modules/es6.object.get-prototype-of.js":"../../node_modules/core-js/modules/es6.object.get-prototype-of.js","core-js/modules/es7.object.lookup-getter.js":"../../node_modules/core-js/modules/es7.object.lookup-getter.js","core-js/modules/es7.object.lookup-setter.js":"../../node_modules/core-js/modules/es7.object.lookup-setter.js","core-js/modules/es6.object.prevent-extensions.js":"../../node_modules/core-js/modules/es6.object.prevent-extensions.js","core-js/modules/es6.object.to-string.js":"../../node_modules/core-js/modules/es6.object.to-string.js","core-js/modules/es6.object.is.js":"../../node_modules/core-js/modules/es6.object.is.js","core-js/modules/es6.object.is-frozen.js":"../../node_modules/core-js/modules/es6.object.is-frozen.js","core-js/modules/es6.object.is-sealed.js":"../../node_modules/core-js/modules/es6.object.is-sealed.js","core-js/modules/es6.object.is-extensible.js":"../../node_modules/core-js/modules/es6.object.is-extensible.js","core-js/modules/es6.object.keys.js":"../../node_modules/core-js/modules/es6.object.keys.js","core-js/modules/es6.object.seal.js":"../../node_modules/core-js/modules/es6.object.seal.js","core-js/modules/es6.object.set-prototype-of.js":"../../node_modules/core-js/modules/es6.object.set-prototype-of.js","core-js/modules/es7.object.values.js":"../../node_modules/core-js/modules/es7.object.values.js","core-js/modules/es6.promise.js":"../../node_modules/core-js/modules/es6.promise.js","core-js/modules/es7.promise.finally.js":"../../node_modules/core-js/modules/es7.promise.finally.js","core-js/modules/es6.reflect.apply.js":"../../node_modules/core-js/modules/es6.reflect.apply.js","core-js/modules/es6.reflect.construct.js":"../../node_modules/core-js/modules/es6.reflect.construct.js","core-js/modules/es6.reflect.define-property.js":"../../node_modules/core-js/modules/es6.reflect.define-property.js","core-js/modules/es6.reflect.delete-property.js":"../../node_modules/core-js/modules/es6.reflect.delete-property.js","core-js/modules/es6.reflect.get.js":"../../node_modules/core-js/modules/es6.reflect.get.js","core-js/modules/es6.reflect.get-own-property-descriptor.js":"../../node_modules/core-js/modules/es6.reflect.get-own-property-descriptor.js","core-js/modules/es6.reflect.get-prototype-of.js":"../../node_modules/core-js/modules/es6.reflect.get-prototype-of.js","core-js/modules/es6.reflect.has.js":"../../node_modules/core-js/modules/es6.reflect.has.js","core-js/modules/es6.reflect.is-extensible.js":"../../node_modules/core-js/modules/es6.reflect.is-extensible.js","core-js/modules/es6.reflect.own-keys.js":"../../node_modules/core-js/modules/es6.reflect.own-keys.js","core-js/modules/es6.reflect.prevent-extensions.js":"../../node_modules/core-js/modules/es6.reflect.prevent-extensions.js","core-js/modules/es6.reflect.set.js":"../../node_modules/core-js/modules/es6.reflect.set.js","core-js/modules/es6.reflect.set-prototype-of.js":"../../node_modules/core-js/modules/es6.reflect.set-prototype-of.js","core-js/modules/es6.regexp.constructor.js":"../../node_modules/core-js/modules/es6.regexp.constructor.js","core-js/modules/es6.regexp.flags.js":"../../node_modules/core-js/modules/es6.regexp.flags.js","core-js/modules/es6.regexp.match.js":"../../node_modules/core-js/modules/es6.regexp.match.js","core-js/modules/es6.regexp.replace.js":"../../node_modules/core-js/modules/es6.regexp.replace.js","core-js/modules/es6.regexp.split.js":"../../node_modules/core-js/modules/es6.regexp.split.js","core-js/modules/es6.regexp.search.js":"../../node_modules/core-js/modules/es6.regexp.search.js","core-js/modules/es6.regexp.to-string.js":"../../node_modules/core-js/modules/es6.regexp.to-string.js","core-js/modules/es6.set.js":"../../node_modules/core-js/modules/es6.set.js","core-js/modules/es6.symbol.js":"../../node_modules/core-js/modules/es6.symbol.js","core-js/modules/es7.symbol.async-iterator.js":"../../node_modules/core-js/modules/es7.symbol.async-iterator.js","core-js/modules/es6.string.anchor.js":"../../node_modules/core-js/modules/es6.string.anchor.js","core-js/modules/es6.string.big.js":"../../node_modules/core-js/modules/es6.string.big.js","core-js/modules/es6.string.blink.js":"../../node_modules/core-js/modules/es6.string.blink.js","core-js/modules/es6.string.bold.js":"../../node_modules/core-js/modules/es6.string.bold.js","core-js/modules/es6.string.code-point-at.js":"../../node_modules/core-js/modules/es6.string.code-point-at.js","core-js/modules/es6.string.ends-with.js":"../../node_modules/core-js/modules/es6.string.ends-with.js","core-js/modules/es6.string.fixed.js":"../../node_modules/core-js/modules/es6.string.fixed.js","core-js/modules/es6.string.fontcolor.js":"../../node_modules/core-js/modules/es6.string.fontcolor.js","core-js/modules/es6.string.fontsize.js":"../../node_modules/core-js/modules/es6.string.fontsize.js","core-js/modules/es6.string.from-code-point.js":"../../node_modules/core-js/modules/es6.string.from-code-point.js","core-js/modules/es6.string.includes.js":"../../node_modules/core-js/modules/es6.string.includes.js","core-js/modules/es6.string.italics.js":"../../node_modules/core-js/modules/es6.string.italics.js","core-js/modules/es6.string.iterator.js":"../../node_modules/core-js/modules/es6.string.iterator.js","core-js/modules/es6.string.link.js":"../../node_modules/core-js/modules/es6.string.link.js","core-js/modules/es7.string.pad-start.js":"../../node_modules/core-js/modules/es7.string.pad-start.js","core-js/modules/es7.string.pad-end.js":"../../node_modules/core-js/modules/es7.string.pad-end.js","core-js/modules/es6.string.raw.js":"../../node_modules/core-js/modules/es6.string.raw.js","core-js/modules/es6.string.repeat.js":"../../node_modules/core-js/modules/es6.string.repeat.js","core-js/modules/es6.string.small.js":"../../node_modules/core-js/modules/es6.string.small.js","core-js/modules/es6.string.starts-with.js":"../../node_modules/core-js/modules/es6.string.starts-with.js","core-js/modules/es6.string.strike.js":"../../node_modules/core-js/modules/es6.string.strike.js","core-js/modules/es6.string.sub.js":"../../node_modules/core-js/modules/es6.string.sub.js","core-js/modules/es6.string.sup.js":"../../node_modules/core-js/modules/es6.string.sup.js","core-js/modules/es7.string.trim-left.js":"../../node_modules/core-js/modules/es7.string.trim-left.js","core-js/modules/es7.string.trim-right.js":"../../node_modules/core-js/modules/es7.string.trim-right.js","core-js/modules/es6.typed.array-buffer.js":"../../node_modules/core-js/modules/es6.typed.array-buffer.js","core-js/modules/es6.typed.int8-array.js":"../../node_modules/core-js/modules/es6.typed.int8-array.js","core-js/modules/es6.typed.uint8-array.js":"../../node_modules/core-js/modules/es6.typed.uint8-array.js","core-js/modules/es6.typed.uint8-clamped-array.js":"../../node_modules/core-js/modules/es6.typed.uint8-clamped-array.js","core-js/modules/es6.typed.int16-array.js":"../../node_modules/core-js/modules/es6.typed.int16-array.js","core-js/modules/es6.typed.uint16-array.js":"../../node_modules/core-js/modules/es6.typed.uint16-array.js","core-js/modules/es6.typed.int32-array.js":"../../node_modules/core-js/modules/es6.typed.int32-array.js","core-js/modules/es6.typed.uint32-array.js":"../../node_modules/core-js/modules/es6.typed.uint32-array.js","core-js/modules/es6.typed.float32-array.js":"../../node_modules/core-js/modules/es6.typed.float32-array.js","core-js/modules/es6.typed.float64-array.js":"../../node_modules/core-js/modules/es6.typed.float64-array.js","core-js/modules/es6.weak-map.js":"../../node_modules/core-js/modules/es6.weak-map.js","core-js/modules/es6.weak-set.js":"../../node_modules/core-js/modules/es6.weak-set.js","core-js/modules/web.timers.js":"../../node_modules/core-js/modules/web.timers.js","core-js/modules/web.immediate.js":"../../node_modules/core-js/modules/web.immediate.js","core-js/modules/web.dom.iterable.js":"../../node_modules/core-js/modules/web.dom.iterable.js","regenerator-runtime/runtime.js":"../../node_modules/regenerator-runtime/runtime.js","./login":"login.js","./mapbox":"mapbox.js","./updateSettings":"updateSettings.js","./stripe":"stripe.js"}],"../../node_modules/parcel-bundler/src/builtins/hmr-runtime.js":[function(require,module,exports) {
 var global = arguments[3];
 var OVERLAY_ID = '__parcel__error__overlay__';
 var OldModule = module.bundle.Module;
@@ -11752,7 +11829,7 @@ var parent = module.bundle.parent;
 if ((!parent || !parent.isParcelRequire) && typeof WebSocket !== 'undefined') {
   var hostname = "" || location.hostname;
   var protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  var ws = new WebSocket(protocol + '://' + hostname + ':' + "55600" + '/');
+  var ws = new WebSocket(protocol + '://' + hostname + ':' + "50548" + '/');
 
   ws.onmessage = function (event) {
     checkedAssets = {};
