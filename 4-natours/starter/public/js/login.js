@@ -5,6 +5,7 @@ import { showAlert } from './alerts';
 export const login = async ({ email, password }) => {
   try {
     // @ts-ignore
+
     const res = await axios({
       method: 'POST',
       url: 'http://localhost:8000/api/v1/users/login',
@@ -19,7 +20,7 @@ export const login = async ({ email, password }) => {
       location.assign('/');
     }
   } catch (error) {
-    showAlert('error', error.response.data.message);
+    showAlert('error', error.response.data?.message || error.message);
   }
 };
 

@@ -27,6 +27,7 @@ const handleJWTExpiredError = () =>
   new AppError('Expired session. Please login a gain.', 401);
 
 const sendErrorDev = (err, req, res) => {
+  // API
   if (req.originalUrl.startsWith('/api')) {
     return res.status(err.statusCode).json({
       status: err.status,
@@ -35,40 +36,62 @@ const sendErrorDev = (err, req, res) => {
       error: err,
     });
   }
-
-  return res.status(err.statusCode).render('', {
-    status: err.status,
+  // RENDER WEBSITE
+  return res.status(err.statusCode).render('error', {
+    title: 'Page not found',
     message: err.message,
-    stack: err.stack,
-    error: err,
   });
 };
 
-const sendErrorProd = (err, res) => {
-  // Operational, trusted error: send message to client
-  if (err.isOperational) {
-    res.status(err.statusCode).json({
-      status: err.status,
-      message: err.message,
-    });
+const sendErrorProd = (err, req, res) => {
+  // API
+  if (req.originalUrls.startsWith('/api')) {
+    // Operational, trusted error: send message to client
+    if (err.isOperational) {
+      return res.status(err.statusCode).json({
+        status: err.status,
+        message: err.message,
+      });
 
-    // Programming or other unknown error: don't leak error details'
-  } else {
+      // Programming or other unknown error: don't leak error details'
+    }
+
     // 1) Log error
     console.error('ERROR:', err);
 
     // 2) Send generic message
-    res.status(500).json({
+    return res.status(500).json({
       status: 'error',
       message: 'Something went wrong',
     });
   }
+
+  // RENDER WEBSITE
+
+  if (err.isOperational) {
+    return res.status(err.statusCode).render('error', {
+      title: 'Page not found',
+      message: err.message,
+    });
+
+    // Programming or other unknown error: don't leak error details'
+  }
+
+  // 1) Log error
+  console.error('ERROR:', err);
+
+  // 2) Send generic message
+  return res.status(500).render('error', {
+    title: 'Page not found',
+    message: 'Please try again later',
+  });
 };
 
 module.exports = (err, req, res, next) => {
   err.statusCode = err.statusCode || 500;
   err.status = err.status || 'error';
   let error = { ...err };
+  error.message = err.message;
 
   switch (process.env.NODE_ENV) {
     case 'development':

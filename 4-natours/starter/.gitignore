@@ -6,6 +6,9 @@ lib/
 .idea/
 dist/
 .bin
+.cache
+.cache/
+.cache/*
 
 #files
 yarn.lock

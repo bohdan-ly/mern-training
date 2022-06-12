@@ -1,5 +1,7 @@
 const express = require('express');
 const {
+  uploadUserPhoto,
+  resizeUserPhoto,
   getAllUsers,
   updateMe,
   createUser,
@@ -34,7 +36,7 @@ router.use(verify);
 router.patch('/updatePassword', updatePassword);
 
 router.get('/me', getMe, getUser);
-router.patch('/updateMe', updateMe);
+router.patch('/updateMe', uploadUserPhoto, resizeUserPhoto, updateMe);
 router.delete('/deleteMe', deleteMe);
 
 router.use(restrictTo(['admin']));
